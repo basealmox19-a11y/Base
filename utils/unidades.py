@@ -5,6 +5,7 @@ UNIDADES_MAP = {
     "GL":"GL (Galão)","DZ":"DZ (Dúzia)","CT":"CT (Centena)","SC":"SC (Saco)",
     "FD":"FD (Fardo)","BL":"BL (Bloco)","PT":"PT (Pacote)","PR":"PR (Par)",
     "TB":"TB (Tubo)","CJ":"CJ (Conjunto)","FL":"FL (Folha)","GR":"GR (Grama)",
+    "PL":"PL (Palete)",
 }
 SIGLAS = list(UNIDADES_MAP.keys())
 OPCOES = list(UNIDADES_MAP.values())
