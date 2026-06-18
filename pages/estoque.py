@@ -134,27 +134,43 @@ def _ajuste():
                 st.success(f"✅ Estoque ajustado para **{qtd_br(nova)} {us_lbl}**"); st.rerun()
     st.markdown("</div>",unsafe_allow_html=True)
 
-def _editar():
-    prods=listar_produtos(apenas_ativos=False); cats=listar_categorias(); cm={c["nome"]:c["id"] for c in cats}
-    if not prods: st.info("Nenhum produto."); return
-    pm={f"{p['nome']} ({p['codigo_interno']})":p for p in prods}
-    st.markdown('<div class="card"><div class="card-h">✏️ Editar Produto</div>',unsafe_allow_html=True)
-    sel=st.selectbox("Produto",list(pm.keys()),key="eps"); p=pm[sel]
-    with st.form("fep"):
-        c1,c2=st.columns(2)
-        with c1:
-            ne=st.text_input("Nome",value=p["nome"])
-            cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
-            ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0)
-            upe=_u("Unidade primária",val=p["unidade_primaria"],key="upe"); use=_u("Unidade secundária",val=p["unidade_secundaria"],key="use")
-        with c2:
-            fe=st.number_input("Fator",value=float(p["fator_conversao"]),min_value=0.001)
-            eme=st.number_input("Est. mín (prim)",value=float(p["estoque_minimo_primario"]),min_value=0.0)
-            eane=st.text_input("Informe o codigo do Produto",value=p.get("ean") or ""); ate=st.checkbox("Ativo",value=p.get("ativo",True))
-        de=st.text_area("Descrição",value=p.get("descricao") or "")
-        if st.form_submit_button("Salvar →",type="primary"):
-            atualizar_produto(p["id"],{"nome":ne.strip(),"categoria_id":cm.get(ce),"unidade_primaria":upe,"unidade_secundaria":use,"fator_conversao":fe,"estoque_minimo_primario":eme,"ean":eane.strip() or None,"descricao":de.strip() or None,"ativo":ate})
-            st.success("✅ Produto atualizado!"); st.rerun()
+def _hist_modal(prod):
+    st.markdown(f'<div class="card"><div class="card-h">📊 Histórico — {esc(prod["nome"])} ({esc(prod["codigo_interno"])})</div>',unsafe_allow_html=True)
+    hoje=datetime.date.today(); ini=hoje.replace(month=1,day=1)
+    c1,c2,c3=st.columns([2,2,1])
+    with c1: d_ini=st.date_input("De",value=ini,key="hist_ini")
+    with c2: d_fim=st.date_input("Até",value=hoje,key="hist_fim")
+    with c3:
+        st.markdown("<div style='height:27px'></div>",unsafe_allow_html=True)
+        st.button("🔍 Filtrar",key="btn_hf",use_container_width=True)
+    if st.button("✖ Fechar",key="fechar_hist"): del st.session_state["hist_produto"]; st.rerun()
+    movs=historico_produto(prod["id"],d_ini.strftime("%Y-%m-%d"),d_fim.strftime("%Y-%m-%d"))
+    if not movs: st.info("Nenhuma movimentação no período."); st.markdown("</div>",unsafe_allow_html=True); return
+    us_lbl=sigla_para_opcao(prod.get("unidade_secundaria","UN"))
+    datas=[]; entradas=[]; saidas=[]; saldo=[]; acum=0.0
+    for m in movs:
+        data=m.get("criado_em","")[:10]; qtd=float(m.get("quantidade_convertida",0)); tipo=m.get("tipo","")
+        if tipo=="entrada": acum+=qtd; entradas.append(qtd); saidas.append(0)
+        else: acum=max(0,acum-qtd); saidas.append(qtd); entradas.append(0)
+        datas.append(data); saldo.append(acum)
+    fig=go.Figure()
+    fig.add_trace(go.Scatter(x=datas,y=saldo,name="Saldo",mode="lines+markers",line=dict(color="#CC0000",width=2),hovertemplate="<b>%{x}</b><br>Saldo: %{y:.2f}<extra></extra>"))
+    fig.add_trace(go.Bar(x=datas,y=entradas,name="Entrada",marker_color="rgba(22,163,74,.6)",hovertemplate="<b>%{x}</b><br>+%{y:.2f}<extra></extra>"))
+    fig.add_trace(go.Bar(x=datas,y=[-v for v in saidas],name="Saída",marker_color="rgba(220,38,38,.5)",hovertemplate="<b>%{x}</b><br>-%{y:.2f}<extra></extra>"))
+    fig.update_layout(**_PL,height=280,barmode="relative",legend=dict(bgcolor="rgba(0,0,0,0)"),
+                      xaxis=dict(gridcolor="rgba(0,0,0,.05)"),yaxis=dict(gridcolor="rgba(0,0,0,.05)",title=f"Qtd ({us_lbl})"))
+    st.plotly_chart(fig,use_container_width=True)
+    st.markdown('<div style="font-size:.75rem;font-weight:700;color:var(--t3);letter-spacing:.06em;text-transform:uppercase;margin:.8rem 0 .4rem;">Detalhamento</div>',unsafe_allow_html=True)
+    rows=""
+    for m in reversed(movs):
+        tipo=m.get("tipo",""); cor="var(--ok)" if tipo=="entrada" else "var(--err)"
+        sinal="+"; tipo_lbl="📥 Entrada" if tipo=="entrada" else "📤 Saída"
+        if tipo!="entrada": sinal="-"
+        un_lbl=sigla_para_opcao(m.get("unidade_informada","UN"))
+        exe=(m.get("exe") or {}).get("nick",""); sol=(m.get("sol") or {}).get("nick","")
+        resp=exe if exe else sol; subtipo=m.get("tipo_entrada") or m.get("tipo_saida") or "—"
+        rows+=f'<tr><td style="color:var(--t3);font-size:.73rem;">{datahora_br(m["criado_em"])}</td><td><strong style="color:{cor};">{tipo_lbl}</strong></td><td style="color:var(--t3);font-size:.75rem;">{subtipo}</td><td style="color:{cor};font-weight:700;font-family:var(--mono);">{sinal}{qtd_br(m["quantidade_convertida"])} {un_lbl}</td><td>{m.get("setor_solicitante") or "—"}</td><td style="color:var(--t3);">{m.get("numero_nf") or "—"}</td><td style="color:var(--t3);">{resp}</td></tr>'
+    st.markdown(f'<table class="tbl"><thead><tr><th>Data/Hora</th><th>Tipo</th><th>Subtipo</th><th>Quantidade</th><th>Setor</th><th>NF</th><th>Responsável</th></tr></thead><tbody>{rows}</tbody></table>',unsafe_allow_html=True)
     st.markdown("</div>",unsafe_allow_html=True)
 
 def _hist_aj():
