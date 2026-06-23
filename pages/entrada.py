@@ -95,8 +95,8 @@ def _nova_entrada():
             with c1:
                 nm    = st.text_input("Nome do produto *")
                 cat   = st.selectbox("Categoria", list(cm.keys()))
-                up_n  = _u("Unidade primária (controle)", val="CX", key="upn")
-                us_n  = _u("Unidade secundária (consumo)", val="UN", key="usn")
+                up_n  = _u("Unidade primária (Como você está recebendo? Em caixa? Paletizado?...)", val="CX", key="upn")
+                us_n  = _u("Unidade secundária (Como as áreas vão consumir? Unidades? A caixa completa?)", val="UN", key="usn")
             with c2:
                 fat_n = st.number_input("Fator de Conversão (1 primária = ? secundárias)", value=1.0, min_value=0.001, step=1.0)
                 em_n  = st.number_input("Estoque mínimo (unidade primária)", value=0.0, min_value=0.0)
