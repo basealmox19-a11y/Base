@@ -98,8 +98,8 @@ def _nova_entrada():
                 up_n  = _u("Unidade primária (Como você está recebendo? Em caixa? Paletizado?...)", val="CX", key="upn")
                 us_n  = _u("Unidade secundária (Como as áreas vão consumir? Unidades? A caixa completa?)", val="UN", key="usn")
             with c2:
-                fat_n = st.number_input("Fator de Conversão (1 primária = ? secundárias)", value=1.0, min_value=0.001, step=1.0)
-                em_n  = st.number_input("Estoque mínimo (unidade primária)", value=0.0, min_value=0.0)
+                fat_n = st.number_input("Fator de Conversão (1 primária = ? secundárias  / Aponte de acordo com o consumo do produto pelas áreas)", value=1.0, min_value=0.001, step=1.0)
+                em_n  = st.number_input("Estoque mínimo (Aponte de acordo com o controle do almoxarifado)", value=0.0, min_value=0.0)
                 ean_n = st.text_input("EAN ou Código SFC (Opcional)",
                                        value=st.session_state.get("en",""),
                                        placeholder="Deixe em branco se não tiver")
