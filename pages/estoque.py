@@ -163,22 +163,64 @@ def _editar():
     if not prods: st.info("Nenhum produto."); return
     pm={f"{p['nome']} ({p['codigo_interno']})":p for p in prods}
     st.markdown('<div class="card"><div class="card-h">✏️ Editar Produto</div>',unsafe_allow_html=True)
-    sel=st.selectbox("Produto",list(pm.keys()),key="eps"); p=pm[sel]
-    with st.form("fep"):
-        c1,c2=st.columns(2)
-        with c1:
-            ne=st.text_input("Nome",value=p["nome"])
-            cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
-            ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0)
-            upe=_u("Unidade primária",val=p["unidade_primaria"],key="upe"); use=_u("Unidade secundária",val=p["unidade_secundaria"],key="use")
-        with c2:
-            fe=st.number_input("Fator",value=float(p["fator_conversao"]),min_value=0.001)
-            eme=st.number_input("Est. mín (prim)",value=float(p["estoque_minimo_primario"]),min_value=0.0)
-            eane=st.text_input("CODIGO DO PRODUTO",value=p.get("ean") or ""); ate=st.checkbox("Ativo",value=p.get("ativo",True))
-        de=st.text_area("Descrição",value=p.get("descricao") or "")
-        if st.form_submit_button("Salvar →",type="primary"):
-            atualizar_produto(p["id"],{"nome":ne.strip(),"categoria_id":cm.get(ce),"unidade_primaria":upe,"unidade_secundaria":use,"fator_conversao":fe,"estoque_minimo_primario":eme,"ean":eane.strip() or None,"descricao":de.strip() or None,"ativo":ate})
-            st.success("✅ Produto atualizado!"); st.rerun()
+
+    # Tela de sucesso pós-edição
+    if st.session_state.get("editar_sucesso"):
+        info=st.session_state["editar_sucesso"]
+        st.success("✅ Produto atualizado com sucesso!")
+        st.markdown(f'<div style="font-size:.85rem;color:var(--t3);">As informações de <strong>{info["nome"]}</strong> foram salvas.</div>',unsafe_allow_html=True)
+        if st.button("✏️ Editar outro produto",type="primary",use_container_width=True):
+            del st.session_state["editar_sucesso"]
+            st.rerun()
+        st.markdown("</div>",unsafe_allow_html=True)
+        return
+
+    # Selectbox FORA do form → troca de produto recarrega tudo imediatamente
+    sel=st.selectbox("Produto",list(pm.keys()),key="eps")
+    p=pm[sel]; pid=p["id"]
+
+    c1,c2=st.columns(2)
+    with c1:
+        # key por produto → campo reseta ao trocar de item
+        ne=st.text_input("Nome",value=p["nome"],key=f"ed_nome_{pid}")
+        cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
+        ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0,key=f"ed_cat_{pid}")
+        # Unidades fora do form → atualizam o preview instantaneamente
+        upe=_u("Unidade primária",val=p["unidade_primaria"],key=f"ed_up_{pid}")
+        use=_u("Unidade secundária",val=p["unidade_secundaria"],key=f"ed_us_{pid}")
+    with c2:
+        fe=st.number_input("Fator de conversão (1 primária = N secundárias)",value=float(p["fator_conversao"]),min_value=0.001,step=0.001,key=f"ed_fat_{pid}")
+        eme=st.number_input("Estoque mínimo (unidade primária)",value=float(p["estoque_minimo_primario"]),min_value=0.0,key=f"ed_emin_{pid}")
+        eane=st.text_input("Código do produto (EAN)",value=p.get("ean") or "",key=f"ed_ean_{pid}")
+        ate=st.checkbox("Ativo",value=p.get("ativo",True),key=f"ed_ativo_{pid}")
+
+    de=st.text_area("Descrição",value=p.get("descricao") or "",key=f"ed_desc_{pid}")
+
+    # Preview de conversão em tempo real — atualiza a cada mudança de unidade ou fator
+    up_lbl=sigla_para_opcao(upe); us_lbl=sigla_para_opcao(use)
+    est_sec=float(p["quantidade_total_secundaria"]); est_prim=est_sec/fe if fe else 0
+    min_sec=eme*fe
+    st.markdown(
+        f'<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;padding:.8rem;margin:.6rem 0;">'
+        f'<div style="font-size:.65rem;color:var(--t3);font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:.5rem;">PRÉVIA DA CONVERSÃO</div>'
+        f'<div style="display:flex;gap:1.5rem;flex-wrap:wrap;">'
+        f'<div><div style="font-size:.65rem;color:var(--t3);">Estoque atual</div>'
+        f'<div style="font-weight:700;">{qtd_br(est_sec)} {us_lbl} = {qtd_br(est_prim)} {up_lbl}</div></div>'
+        f'<div><div style="font-size:.65rem;color:var(--t3);">Mínimo</div>'
+        f'<div style="font-weight:700;">{qtd_br(eme)} {up_lbl} = {qtd_br(min_sec)} {us_lbl}</div></div>'
+        f'<div><div style="font-size:.65rem;color:var(--t3);">Regra</div>'
+        f'<div style="font-weight:700;">1 {up_lbl} = {qtd_br(fe)} {us_lbl}</div></div>'
+        f'</div></div>',
+        unsafe_allow_html=True
+    )
+
+    if st.button("Salvar →",type="primary",use_container_width=True,key="ed_salvar"):
+        if not ne.strip():
+            st.error("Nome obrigatório.")
+        else:
+            atualizar_produto(pid,{"nome":ne.strip(),"categoria_id":cm.get(ce),"unidade_primaria":upe,"unidade_secundaria":use,"fator_conversao":fe,"estoque_minimo_primario":eme,"ean":eane.strip() or None,"descricao":de.strip() or None,"ativo":ate})
+            st.session_state["editar_sucesso"]={"nome":ne.strip()}
+            st.rerun()
     st.markdown("</div>",unsafe_allow_html=True)
 
 def _hist_aj():
