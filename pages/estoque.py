@@ -89,8 +89,8 @@ def _editar():
             ne=st.text_input("Nome",value=p["nome"])
             cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
             ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0)
-            upe=st.selectbox("Un. primária",UNS,index=UNS.index(p["unidade_primaria"]) if p["unidade_primaria"] in UNS else 0)
-            use=st.selectbox("Un. secundária",UNS,index=UNS.index(p["unidade_secundaria"]) if p["unidade_secundaria"] in UNS else 0)
+            upe=st.selectbox("Unidade primária (Como você está recebendo? Em caixa? Paletizado?...)",UNS,index=UNS.index(p["unidade_primaria"]) if p["unidade_primaria"] in UNS else 0)
+            use=st.selectbox("Unidade secundária (Como as áreas vão consumir? Unidades? A caixa completa?)",UNS,index=UNS.index(p["unidade_secundaria"]) if p["unidade_secundaria"] in UNS else 0)
         with c2:
             fe=st.number_input("Fator",value=float(p["fator_conversao"]),min_value=0.001)
             eme=st.number_input("Est. mín (prim)",value=float(p["estoque_minimo_primario"]),min_value=0.0)
