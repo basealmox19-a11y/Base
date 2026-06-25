@@ -162,7 +162,7 @@ def _editar():
     prods=listar_produtos(apenas_ativos=False); cats=listar_categorias(); cm={c["nome"]:c["id"] for c in cats}
     if not prods: st.info("Nenhum produto."); return
     pm={f"{p['nome']} ({p['codigo_interno']})":p for p in prods}
-    st.markdown('<div class="card"><div class="card-h">✏️ Editar Produto</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-h">✏️ Editar Produto</div>',unsafe_allow_html=True)
     sel=st.selectbox("Produto",list(pm.keys()),key="eps"); p=pm[sel]
     with st.form("fep"):
         c1,c2=st.columns(2)
@@ -170,18 +170,16 @@ def _editar():
             ne=st.text_input("Nome",value=p["nome"])
             cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
             ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0)
-            upe=st.selectbox("Unidade primária (Como você está recebendo? Em caixa? Paletizado?...)",UNS,index=UNS.index(p["unidade_primaria"]) if p["unidade_primaria"] in UNS else 0)
-            use=st.selectbox("Unidade secundária (Como as áreas vão consumir? Unidades? A caixa completa?)",UNS,index=UNS.index(p["unidade_secundaria"]) if p["unidade_secundaria"] in UNS else 0)
+            upe=_u("Unidade primária",val=p["unidade_primaria"],key="upe"); use=_u("Unidade secundária",val=p["unidade_secundaria"],key="use")
         with c2:
             fe=st.number_input("Fator",value=float(p["fator_conversao"]),min_value=0.001)
             eme=st.number_input("Est. mín (prim)",value=float(p["estoque_minimo_primario"]),min_value=0.0)
-            eane=st.text_input("CÓDIGO DO PRODUTO",value=p.get("ean") or "")
-            ate=st.checkbox("Ativo",value=p.get("ativo",True))
+            eane=st.text_input("CODIGO DO PRODUTO",value=p.get("ean") or ""); ate=st.checkbox("Ativo",value=p.get("ativo",True))
         de=st.text_area("Descrição",value=p.get("descricao") or "")
         if st.form_submit_button("Salvar →",type="primary"):
             atualizar_produto(p["id"],{"nome":ne.strip(),"categoria_id":cm.get(ce),"unidade_primaria":upe,"unidade_secundaria":use,"fator_conversao":fe,"estoque_minimo_primario":eme,"ean":eane.strip() or None,"descricao":de.strip() or None,"ativo":ate})
             st.success("✅ Produto atualizado!"); st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>",unsafe_allow_html=True)
 
 def _hist_aj():
     movs=listar_movimentacoes(limite=100)
