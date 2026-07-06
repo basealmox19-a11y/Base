@@ -344,18 +344,41 @@ def stats_dashboard() -> dict:
 
 
 # ── SOLICITAÇÕES DE COMPRA ───────────────────────────────────────
-_SEL_SC = """*,
-    solicitante:usuarios!solicitacoes_compra_usuario_id_fkey(nick,nome),
-    autorizador:usuarios!solicitacoes_compra_usuario_autorizador_fkey(nick,nome)"""
+# Colunas listadas explicitamente: evita quebra silenciosa quando alguma
+# coluna nova (migration) ainda não estiver no schema cache do Supabase.
+_SEL_SC_FULL = (
+    "id, produto_descricao, nome_solicitante, setor_solicitante, "
+    "nick_solicitante, usuario_id, status, motivo_rejeicao, "
+    "usuario_autorizador, data_autorizacao, observacao, criado_em, "
+    "codigo_requisicao, status_compra, obs_compra, "
+    "notificacao_compra_lida, notificacao_status_lida, entrega_confirmada, "
+    "autorizador:usuarios!solicitacoes_compra_usuario_autorizador_fkey(nick,nome)"
+)
+_SEL_SC_MIN = (
+    "id, produto_descricao, nome_solicitante, setor_solicitante, "
+    "nick_solicitante, usuario_id, status, motivo_rejeicao, "
+    "usuario_autorizador, data_autorizacao, observacao, criado_em"
+)
 
 def listar_solicitacoes_compra(status=None) -> list:
-    try:
-        q = get_sb().table("solicitacoes_compra").select(_SEL_SC).order("criado_em", desc=True)
-        if status: q = q.eq("status", status)
+    """Retorna solicitacoes_compra. Usa select completo; fallback sem joins se falhar."""
+    def _query(sel):
+        q = get_sb().table("solicitacoes_compra").select(sel).order("criado_em", desc=True)
+        if status:
+            q = q.eq("status", status)
         return q.execute().data or []
+
+    try:
+        return _query(_SEL_SC_FULL)
     except Exception as e:
-        _log.error("listar_solicitacoes_compra: %s", e)
-        return []
+        _log.error("listar_solicitacoes_compra (full): %s", e)
+        try:
+            dados = _query(_SEL_SC_MIN)
+            _log.warning("listar_solicitacoes_compra: fallback minimo (%d registros)", len(dados))
+            return dados
+        except Exception as e2:
+            _log.error("listar_solicitacoes_compra (fallback): %s", e2)
+            return []
 
 def criar_solicitacao_compra(dados: dict) -> dict:
     try: return get_sb().table("solicitacoes_compra").insert(dados).execute().data[0]
@@ -369,6 +392,26 @@ def atualizar_solicitacao_compra(scid: str, dados: dict):
     except Exception as e:
         _log.error("atualizar_solicitacao_compra: %s", e)
         st.error("❌ Erro ao atualizar solicitação de compra.")
+
+def listar_solicitacoes_unificadas(status=None) -> list:
+    """
+    Retorna almoxarifado + compras numa lista única normalizada,
+    ordenada por criado_em desc. Usada no histórico unificado.
+    Cada item tem campo 'origem': 'almox' ou 'compra'.
+    """
+    alm  = listar_solicitacoes(status)
+    comp = listar_solicitacoes_compra(status)
+
+    itens = []
+    for s in alm:
+        s["origem"] = "almox"
+        itens.append(s)
+    for s in comp:
+        s["origem"] = "compra"
+        itens.append(s)
+
+    itens.sort(key=lambda x: x.get("criado_em") or "", reverse=True)
+    return itens
 
 def contar_solicitacoes_compra_pendentes() -> int:
     try:
