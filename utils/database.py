@@ -169,6 +169,27 @@ def estoque_disponivel(produto_id: str) -> float:
         _log.error("estoque_disponivel: %s", e)
         return 0.0
 
+def mapa_reservas() -> dict:
+    """Retorna {produto_id: quantidade_reservada} para TODOS os produtos em uma
+    única consulta. Use nas telas que listam vários produtos (Inventário, seleção
+    de solicitação, etc.) em vez de chamar estoque_disponivel() em loop — evita
+    1 consulta por produto e mantém a tela responsiva mesmo com estoque grande."""
+    try:
+        rows = (get_sb().table("movimentacoes")
+                .select("produto_id,quantidade_convertida")
+                .eq("tipo","saida").eq("tipo_saida","SOLICITADA")
+                .in_("status",["pendente","aprovado"])
+                .execute().data or [])
+        m = {}
+        for r in rows:
+            pid = r.get("produto_id")
+            if not pid: continue
+            m[pid] = m.get(pid,0.0) + float(r.get("quantidade_convertida",0))
+        return m
+    except Exception as e:
+        _log.error("mapa_reservas: %s", e)
+        return {}
+
 # ── DOCUMENTOS ───────────────────────────────────────────────────
 def criar_documento(dados) -> dict:
     try: return get_sb().table("documentos").insert(dados).execute().data[0]
@@ -387,11 +408,14 @@ def criar_solicitacao_compra(dados: dict) -> dict:
         st.error("❌ Erro ao registrar solicitação de compra.")
         st.stop()
 
-def atualizar_solicitacao_compra(scid: str, dados: dict):
-    try: get_sb().table("solicitacoes_compra").update(dados).eq("id", scid).execute()
+def atualizar_solicitacao_compra(scid: str, dados: dict) -> bool:
+    try:
+        resp = get_sb().table("solicitacoes_compra").update(dados).eq("id", scid).execute()
+        return bool(resp and resp.data)
     except Exception as e:
         _log.error("atualizar_solicitacao_compra: %s", e)
         st.error("❌ Erro ao atualizar solicitação de compra.")
+        return False
 
 def listar_solicitacoes_unificadas(status=None) -> list:
     """
