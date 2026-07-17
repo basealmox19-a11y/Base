@@ -187,15 +187,36 @@ def _form_solicitar(u):
         un_sec    = prod.get("unidade_secundaria", "UN")
         un_lbl    = sigla_para_opcao(un_sec)
         disp      = estoque_disponivel(prod["id"])
+        bruto     = float(prod.get("quantidade_total_secundaria", 0))
+        reservado = max(0.0, bruto - disp)
         cor_est   = "var(--ok)" if disp > 0 else "var(--err)"
+        linha_reservado = (
+            f'🔒 Reservado (aguardando retirada): <strong style="color:var(--warn);">{qtd_br(reservado)} {un_lbl}</strong><br>'
+            if reservado > 0 else ""
+        )
         st.markdown(
             f'<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;'
-            f'padding:.55rem .9rem;font-size:.82rem;margin:.4rem 0;">'
-            f'📦 Saldo disponível: <strong style="color:{cor_est};">{qtd_br(disp)} {un_lbl}</strong>'
+            f'padding:.55rem .9rem;font-size:.82rem;margin:.4rem 0;line-height:1.7;">'
+            f'📦 Estoque total: <strong>{qtd_br(bruto)} {un_lbl}</strong><br>'
+            f'{linha_reservado}'
+            f'✅ Saldo disponível para solicitar: <strong style="color:{cor_est};">{qtd_br(disp)} {un_lbl}</strong>'
             f'</div>',
             unsafe_allow_html=True,
         )
-        qtd = st.number_input(f"Quantidade * ({un_lbl})", min_value=0.001, value=1.0, step=1.0, key="sol_qtd")
+        if disp > 0:
+            qtd = st.number_input(
+                f"Quantidade * ({un_lbl})",
+                min_value=0.001, max_value=float(disp), value=min(1.0, float(disp)),
+                step=1.0, key="sol_qtd",
+            )
+        else:
+            st.number_input(
+                f"Quantidade * ({un_lbl})",
+                min_value=0.0, max_value=0.0, value=0.0, step=1.0,
+                key="sol_qtd", disabled=True,
+            )
+            qtd = 0.0
+            st.warning("⚠️ Sem saldo disponível para este produto agora (tudo já reservado ou esgotado).")
     with c2:
         setor  = st.selectbox("Setor *", sn, key="sol_setor")
         nome_s = st.text_input("Nome do solicitante *", value=u.get("nome") or u.get("nick", ""), key="sol_nome")
@@ -204,23 +225,30 @@ def _form_solicitar(u):
     if st.button("📨 Enviar Solicitação →", type="primary", use_container_width=True, key="btn_enviar_sol"):
         if not nome_s.strip():
             st.error("Nome obrigatório.")
+        elif qtd <= 0:
+            st.error("Não há saldo disponível para solicitar este produto.")
         else:
-            registrar_movimentacao({
-                "produto_id":            prod["id"],
-                "tipo":                  "saida",
-                "tipo_saida":            "SOLICITADA",
-                "status":                "pendente",
-                "quantidade_informada":  qtd,
-                "unidade_informada":     un_sec,
-                "quantidade_convertida": qtd,
-                "setor_solicitante":     setor,
-                "nome_solicitante":      nome_s.strip(),
-                "nick_solicitante":      u["nick"],
-                "observacao":            obs.strip() or None,
-                "usuario_solicitante":   u["id"],
-            })
-            st.session_state["sol_enviada_ok"] = True
-            st.rerun()
+            disp_agora = estoque_disponivel(prod["id"])  # revalida na hora do envio p/ evitar corrida entre usuários simultâneos
+            if qtd > disp_agora:
+                st.error(f"❌ Saldo insuficiente. Disponível agora: {qtd_br(disp_agora)} {un_lbl}. A tela será atualizada — tente novamente.")
+                st.rerun()
+            else:
+                registrar_movimentacao({
+                    "produto_id":            prod["id"],
+                    "tipo":                  "saida",
+                    "tipo_saida":            "SOLICITADA",
+                    "status":                "pendente",
+                    "quantidade_informada":  qtd,
+                    "unidade_informada":     un_sec,
+                    "quantidade_convertida": qtd,
+                    "setor_solicitante":     setor,
+                    "nome_solicitante":      nome_s.strip(),
+                    "nick_solicitante":      u["nick"],
+                    "observacao":            obs.strip() or None,
+                    "usuario_solicitante":   u["id"],
+                })
+                st.session_state["sol_enviada_ok"] = True
+                st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
