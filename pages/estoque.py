@@ -2,7 +2,7 @@
 import streamlit as st, datetime
 import plotly.graph_objects as go
 from utils.database import (listar_produtos, listar_categorias, atualizar_produto,
-    registrar_movimentacao, listar_movimentacoes, historico_produto, mapa_reservas)
+    registrar_movimentacao, listar_movimentacoes, historico_produto)
 from utils.auth import sessao, is_admin
 from utils.ui import badge, status_estoque, kpi_html
 from utils.fmt import qtd_br, datahora_br
@@ -33,17 +33,15 @@ def tela_estoque():
     st.markdown("</div>",unsafe_allow_html=True)
 
 def _inv():
-    prods=listar_produtos(); cats=listar_categorias(); reservas=mapa_reservas()
+    prods=listar_produtos(); cats=listar_categorias()
     if not prods: st.info("Nenhum produto."); return
     c1,c2,c3=st.columns([3,2,2])
     with c1: busca=st.text_input("🔍 Buscar",key="eb2")
     with c2: cf=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats])
     with c3: sf=st.selectbox("Status",["Todos","OK","Baixo","Crítico"])
-    def _disp(p):
-        return max(0.0, float(p["quantidade_total_secundaria"]) - reservas.get(p["id"],0.0))
     total=len(prods)
-    criticos=sum(1 for p in prods if _disp(p)<=0)
-    baixos=sum(1 for p in prods if 0<_disp(p)<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
+    criticos=sum(1 for p in prods if float(p["quantidade_total_secundaria"])<=0)
+    baixos=sum(1 for p in prods if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
     ok_c=total-criticos-baixos
     st.markdown(f'<div class="kpis" style="grid-template-columns:repeat(4,1fr);margin:.7rem 0 1rem;">{kpi_html("Total",total,"","var(--t2)")}{kpi_html("OK",ok_c,"","var(--ok)")}{kpi_html("Baixo",baixos,"","var(--warn)")}{kpi_html("Crítico",criticos,"","var(--err)")}</div>',unsafe_allow_html=True)
     fil=prods
@@ -51,19 +49,52 @@ def _inv():
         b=busca.lower(); fil=[p for p in fil if b in p["nome"].lower() or b in p["codigo_interno"].lower() or (p.get("ean") and b in p["ean"].lower())]
     if cf!="Todas": fil=[p for p in fil if p.get("categorias") and p["categorias"]["nome"]==cf]
     if sf!="Todos":
-        def _s(p): t,_=status_estoque(_disp(p),float(p["estoque_minimo_primario"]),float(p["fator_conversao"])); return t
+        def _s(p): t,_=status_estoque(float(p["quantidade_total_secundaria"]),float(p["estoque_minimo_primario"]),float(p["fator_conversao"])); return t
         fil=[p for p in fil if _s(p)==sf]
     st.markdown(f'<div class="card"><div class="card-h">Produtos ({len(fil)})</div>',unsafe_allow_html=True)
+
+    # --- Paginação ---
+    OPCOES_PP=[10,20,40]
+    filtro_sig=f"{busca}|{cf}|{sf}"
+    if st.session_state.get("inv_filtro_sig")!=filtro_sig:
+        st.session_state["inv_filtro_sig"]=filtro_sig
+        st.session_state["inv_pagina"]=1
+
+    cpp1,cpp2=st.columns([1,5])
+    with cpp1:
+        por_pagina=st.selectbox("Itens por página",OPCOES_PP,key="inv_por_pagina")
+    if st.session_state.get("inv_por_pagina_ant")!=por_pagina:
+        st.session_state["inv_por_pagina_ant"]=por_pagina
+        st.session_state["inv_pagina"]=1
+
+    total_paginas=max(1,-(-len(fil)//por_pagina)) if fil else 1
+    pagina=st.session_state.get("inv_pagina",1)
+    pagina=min(max(pagina,1),total_paginas)
+    st.session_state["inv_pagina"]=pagina
+
+    ini=(pagina-1)*por_pagina; fim=ini+por_pagina
+    fil_pag=fil[ini:fim]
+
     rows=""
-    for p in fil:
-        bruto=float(p["quantidade_total_secundaria"]); res=reservas.get(p["id"],0.0)
-        est=_disp(p); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
+    for p in fil_pag:
+        est=float(p["quantidade_total_secundaria"]); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
         estp=est/fat if fat else 0; txt,cls=status_estoque(est,minp,fat)
         cat=(p.get("categorias") or {}).get("nome","—"); up_lbl=sigla_para_opcao(p["unidade_primaria"]); us_lbl=sigla_para_opcao(p["unidade_secundaria"])
-        reserva_html=f'<br><span style="font-size:.71rem;color:var(--warn);">🔒 {qtd_br(res)} {us_lbl} reservado</span>' if res>0 else ""
-        rows+=f'<tr><td><strong>{p["nome"]}</strong></td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span>{reserva_html}</td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
+        rows+=f'<tr><td><strong>{p["nome"]}</strong></td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span></td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
     vz='<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
-    st.markdown(f'<table class="tbl"><thead><tr><th>Produto</th><th>Código</th><th>EAN</th><th>Categoria</th><th>Estoque Disponível</th><th>Mínimo</th><th>Status</th></tr></thead><tbody>{rows or vz}</tbody></table>',unsafe_allow_html=True)
+    st.markdown(f'<table class="tbl"><thead><tr><th>Produto</th><th>Código</th><th>EAN</th><th>Categoria</th><th>Estoque</th><th>Mínimo</th><th>Status</th></tr></thead><tbody>{rows or vz}</tbody></table>',unsafe_allow_html=True)
+
+    if fil and total_paginas>1:
+        cn1,cn2,cn3=st.columns([1,2,1])
+        with cn1:
+            if st.button("← Anterior",disabled=(pagina<=1),key="inv_prev",use_container_width=True):
+                st.session_state["inv_pagina"]=pagina-1; st.rerun()
+        with cn2:
+            st.markdown(f'<div style="text-align:center;color:var(--t3);padding-top:.45rem;font-size:.82rem;">Página {pagina} de {total_paginas}</div>',unsafe_allow_html=True)
+        with cn3:
+            if st.button("Próxima →",disabled=(pagina>=total_paginas),key="inv_next",use_container_width=True):
+                st.session_state["inv_pagina"]=pagina+1; st.rerun()
+
     st.markdown("</div>",unsafe_allow_html=True)
     if fil:
         st.markdown("**📊 Ver histórico de movimentações por produto:**")
