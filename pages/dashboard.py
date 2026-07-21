@@ -84,6 +84,11 @@ def _consumo_geral(consumo):
         '<div class="card"><div class="card-h">📊 Consumo por Setor (total)</div>',
         unsafe_allow_html=True,
     )
+    # Remove "Sem Setor" da exibição do gráfico (apenas camada visual)
+    consumo = {
+        k: v for k, v in (consumo or {}).items()
+        if k.strip().lower() != "sem setor"
+    }
     if not consumo:
         st.markdown(
             '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1rem">Sem dados.</p>',
@@ -167,11 +172,9 @@ def _recentes(r):
     else:
         rows = ""
         for m in movs:
-            prod_info = m.get("produtos") or m.get("produto") or {}
-            prod   = prod_info.get("nome") or m.get("produto_nome") or "—"
-            setor  = m.get("setor_solicitante") or "—"
-            cor    = "var(--ok)" if m["tipo"] == "entrada" else "var(--err)"
-            sinal  = "+" if m["tipo"] == "entrada" else "-"
+            prod  = (m.get("produtos") or {}).get("nome","—")
+            cor   = "var(--ok)" if m["tipo"] == "entrada" else "var(--err)"
+            sinal = "+" if m["tipo"] == "entrada" else "-"
             tipo_lbl = "📥" if m["tipo"] == "entrada" else "📤"
             rows += (
                 f'<tr>'
@@ -179,14 +182,13 @@ def _recentes(r):
                 f'<td>{prod[:28]}{"…" if len(prod)>28 else ""}</td>'
                 f'<td style="color:{cor};font-weight:700;font-family:var(--mono);">'
                 f'{tipo_lbl} {sinal}{qtd_br(m["quantidade_informada"])} {m["unidade_informada"]}</td>'
-                f'<td style="font-size:.78rem;">{setor[:20]}{"…" if len(setor)>20 else ""}</td>'
                 f'</tr>'
             )
         # Altura fixa para 10 linhas (~38px cada) — rola se houver mais
         st.markdown(
             f'<div style="max-height:390px;overflow-y:auto;border-radius:5px;">'
             f'<table class="tbl"><thead><tr>'
-            f'<th>Data/Hora</th><th>Produto</th><th>Movimentação</th><th>Setor Solicitante</th>'
+            f'<th>Data/Hora</th><th>Produto</th><th>Movimentação</th>'
             f'</tr></thead><tbody>{rows}</tbody></table></div>'
             f'<div style="font-size:.72rem;color:var(--t3);margin-top:.4rem;">'
             f'{len(movs)} registro(s) no período</div>',
