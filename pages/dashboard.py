@@ -132,7 +132,6 @@ def _pie(s):
 
 
 def _recentes(r):
-    from utils.fmt import sigla_para_opcao  # importação segura se existir
     st.markdown(
         '<div class="card"><div class="card-h">🔄 Movimentações Recentes</div>',
         unsafe_allow_html=True,
