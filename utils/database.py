@@ -169,27 +169,6 @@ def estoque_disponivel(produto_id: str) -> float:
         _log.error("estoque_disponivel: %s", e)
         return 0.0
 
-def mapa_reservas() -> dict:
-    """Retorna {produto_id: quantidade_reservada} para TODOS os produtos em uma
-    única consulta. Use nas telas que listam vários produtos (Inventário, seleção
-    de solicitação, etc.) em vez de chamar estoque_disponivel() em loop — evita
-    1 consulta por produto e mantém a tela responsiva mesmo com estoque grande."""
-    try:
-        rows = (get_sb().table("movimentacoes")
-                .select("produto_id,quantidade_convertida")
-                .eq("tipo","saida").eq("tipo_saida","SOLICITADA")
-                .in_("status",["pendente","aprovado"])
-                .execute().data or [])
-        m = {}
-        for r in rows:
-            pid = r.get("produto_id")
-            if not pid: continue
-            m[pid] = m.get(pid,0.0) + float(r.get("quantidade_convertida",0))
-        return m
-    except Exception as e:
-        _log.error("mapa_reservas: %s", e)
-        return {}
-
 # ── DOCUMENTOS ───────────────────────────────────────────────────
 def criar_documento(dados) -> dict:
     try: return get_sb().table("documentos").insert(dados).execute().data[0]
@@ -322,6 +301,8 @@ def consumo_por_periodo(data_ini, data_fim, setor=None) -> list:
              .in_("tipo",["entrada","saida"]).eq("status","concluido")
              .gte("criado_em",f"{data_ini}T00:00:00")
              .lte("criado_em",f"{data_fim}T23:59:59")
+             .or_("tipo_entrada.is.null,tipo_entrada.neq.Ajuste Manual")  # exclui ajustes manuais (ambas direções)
+             .not_.is_("setor_solicitante","null")  # exclui movimentações sem setor
              .order("criado_em",desc=False))
         if setor: q = q.eq("setor_solicitante",setor)
         return q.execute().data or []
