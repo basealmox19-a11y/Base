@@ -84,11 +84,6 @@ def _consumo_geral(consumo):
         '<div class="card"><div class="card-h">📊 Consumo por Setor (total)</div>',
         unsafe_allow_html=True,
     )
-    # Remove "Sem Setor" da exibição do gráfico (apenas camada visual)
-    consumo = {
-        k: v for k, v in (consumo or {}).items()
-        if k.strip().lower() != "sem setor"
-    }
     if not consumo:
         st.markdown(
             '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1rem">Sem dados.</p>',
@@ -137,6 +132,7 @@ def _pie(s):
 
 
 def _recentes(r):
+    from utils.fmt import sigla_para_opcao  # importação segura se existir
     st.markdown(
         '<div class="card"><div class="card-h">🔄 Movimentações Recentes</div>',
         unsafe_allow_html=True,
