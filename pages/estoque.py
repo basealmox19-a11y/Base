@@ -1,9 +1,10 @@
 """pages/estoque.py — Com histórico de movimentações por produto"""
-import streamlit as st, datetime
+import streamlit as st, datetime, io
+import pandas as pd
 import plotly.graph_objects as go
 from utils.database import (listar_produtos, listar_categorias, atualizar_produto,
     registrar_movimentacao, listar_movimentacoes, historico_produto)
-from utils.auth import sessao, is_admin
+from utils.auth import sessao, is_admin, is_almoxarife
 from utils.ui import badge, status_estoque, kpi_html
 from utils.fmt import qtd_br, datahora_br
 from utils.unidades import SIGLAS, OPCOES, sigla_para_opcao, opcao_para_sigla
@@ -16,6 +17,38 @@ def _u(label,val="UN",key=None):
 
 _PL=dict(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
          font=dict(family="Plus Jakarta Sans",size=11),margin=dict(l=0,r=0,t=20,b=0))
+
+def _planilha_estoque(prods):
+    """Gera um .xlsx (bytes) com todo o inventário, independente de filtros aplicados na tela."""
+    linhas=[]
+    for p in prods:
+        est=float(p["quantidade_total_secundaria"]); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
+        estp=est/fat if fat else 0
+        status,_=status_estoque(est,minp,fat)
+        cat=(p.get("categorias") or {}).get("nome","—")
+        linhas.append({
+            "Código":                p["codigo_interno"],
+            "Produto":               p["nome"],
+            "EAN":                   p.get("ean") or "",
+            "Categoria":             cat,
+            "Estoque (Secundária)":  round(est,2),
+            "Unidade Secundária":    sigla_para_opcao(p["unidade_secundaria"]),
+            "Estoque (Primária)":    round(estp,2),
+            "Unidade Primária":      sigla_para_opcao(p["unidade_primaria"]),
+            "Estoque Mínimo (Prim.)":round(minp,2),
+            "Status":                status,
+            "Ativo":                 "Sim" if p.get("ativo",True) else "Não",
+        })
+    df=pd.DataFrame(linhas)
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf,engine="openpyxl") as writer:
+        df.to_excel(writer,index=False,sheet_name="Inventário")
+        ws=writer.sheets["Inventário"]
+        for i,col in enumerate(df.columns):
+            largura=max((df[col].astype(str).map(len).max() if not df.empty else 0),len(col))+2
+            ws.column_dimensions[chr(65+i)].width=largura
+    buf.seek(0)
+    return buf.getvalue()
 
 def tela_estoque():
     st.markdown('<div class="pg">',unsafe_allow_html=True)
@@ -44,6 +77,18 @@ def _inv():
     baixos=sum(1 for p in prods if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
     ok_c=total-criticos-baixos
     st.markdown(f'<div class="kpis" style="grid-template-columns:repeat(4,1fr);margin:.7rem 0 1rem;">{kpi_html("Total",total,"","var(--t2)")}{kpi_html("OK",ok_c,"","var(--ok)")}{kpi_html("Baixo",baixos,"","var(--warn)")}{kpi_html("Crítico",criticos,"","var(--err)")}</div>',unsafe_allow_html=True)
+
+    if is_almoxarife():
+        dados_xlsx=_planilha_estoque(prods)
+        st.download_button(
+            "📥 Baixar Planilha do Inventário",
+            data=dados_xlsx,
+            file_name=f"inventario_{datetime.date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="btn_export_inv",
+        )
+
     fil=prods
     if busca.strip():
         b=busca.lower(); fil=[p for p in fil if b in p["nome"].lower() or b in p["codigo_interno"].lower() or (p.get("ean") and b in p["ean"].lower())]
