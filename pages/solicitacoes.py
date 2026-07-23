@@ -446,7 +446,7 @@ def _aprovar_unificado():
                 st.markdown(f"**{qtd_br(s['quantidade_informada'])} {un_lbl}**")
                 st.markdown(
                     f"<span style='font-size:.75rem;color:{cor_disp};'>"
-                    f"Disponível: {qtd_br(disp)} {un_lbl}</span>",
+                    f"Restante no Estoque: {qtd_br(disp)} {un_lbl}</span>",
                     unsafe_allow_html=True,
                 )
             with c3:
