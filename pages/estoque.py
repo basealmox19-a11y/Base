@@ -1,9 +1,8 @@
 """pages/estoque.py — Com histórico de movimentações por produto"""
-import streamlit as st, datetime, io
-import pandas as pd
+import streamlit as st, datetime
 import plotly.graph_objects as go
 from utils.database import (listar_produtos, listar_categorias, atualizar_produto,
-    registrar_movimentacao, listar_movimentacoes, historico_produto)
+    registrar_movimentacao, listar_movimentacoes, historico_produto, listar_solicitacoes)
 from utils.auth import sessao, is_admin, is_almoxarife
 from utils.ui import badge, status_estoque, kpi_html
 from utils.fmt import qtd_br, datahora_br
@@ -17,38 +16,6 @@ def _u(label,val="UN",key=None):
 
 _PL=dict(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
          font=dict(family="Plus Jakarta Sans",size=11),margin=dict(l=0,r=0,t=20,b=0))
-
-def _planilha_estoque(prods):
-    """Gera um .xlsx (bytes) com todo o inventário, independente de filtros aplicados na tela."""
-    linhas=[]
-    for p in prods:
-        est=float(p["quantidade_total_secundaria"]); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
-        estp=est/fat if fat else 0
-        status,_=status_estoque(est,minp,fat)
-        cat=(p.get("categorias") or {}).get("nome","—")
-        linhas.append({
-            "Código":                p["codigo_interno"],
-            "Produto":               p["nome"],
-            "EAN":                   p.get("ean") or "",
-            "Categoria":             cat,
-            "Estoque (Secundária)":  round(est,2),
-            "Unidade Secundária":    sigla_para_opcao(p["unidade_secundaria"]),
-            "Estoque (Primária)":    round(estp,2),
-            "Unidade Primária":      sigla_para_opcao(p["unidade_primaria"]),
-            "Estoque Mínimo (Prim.)":round(minp,2),
-            "Status":                status,
-            "Ativo":                 "Sim" if p.get("ativo",True) else "Não",
-        })
-    df=pd.DataFrame(linhas)
-    buf=io.BytesIO()
-    with pd.ExcelWriter(buf,engine="openpyxl") as writer:
-        df.to_excel(writer,index=False,sheet_name="Inventário")
-        ws=writer.sheets["Inventário"]
-        for i,col in enumerate(df.columns):
-            largura=max((df[col].astype(str).map(len).max() if not df.empty else 0),len(col))+2
-            ws.column_dimensions[chr(65+i)].width=largura
-    buf.seek(0)
-    return buf.getvalue()
 
 def tela_estoque():
     st.markdown('<div class="pg">',unsafe_allow_html=True)
@@ -68,6 +35,13 @@ def tela_estoque():
 def _inv():
     prods=listar_produtos(); cats=listar_categorias()
     if not prods: st.info("Nenhum produto."); return
+    ver_reserva=is_almoxarife()
+    reservas={}
+    if ver_reserva:
+        for s in listar_solicitacoes():
+            if s.get("status") in ("pendente","aprovado"):
+                pid=(s.get("produto") or {}).get("id")
+                if pid: reservas[pid]=reservas.get(pid,0.0)+float(s.get("quantidade_convertida") or 0)
     c1,c2,c3=st.columns([3,2,2])
     with c1: busca=st.text_input("🔍 Buscar",key="eb2")
     with c2: cf=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats])
@@ -77,18 +51,6 @@ def _inv():
     baixos=sum(1 for p in prods if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
     ok_c=total-criticos-baixos
     st.markdown(f'<div class="kpis" style="grid-template-columns:repeat(4,1fr);margin:.7rem 0 1rem;">{kpi_html("Total",total,"","var(--t2)")}{kpi_html("OK",ok_c,"","var(--ok)")}{kpi_html("Baixo",baixos,"","var(--warn)")}{kpi_html("Crítico",criticos,"","var(--err)")}</div>',unsafe_allow_html=True)
-
-    if is_almoxarife():
-        dados_xlsx=_planilha_estoque(prods)
-        st.download_button(
-            "📥 Baixar Planilha do Inventário",
-            data=dados_xlsx,
-            file_name=f"inventario_{datetime.date.today().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key="btn_export_inv",
-        )
-
     fil=prods
     if busca.strip():
         b=busca.lower(); fil=[p for p in fil if b in p["nome"].lower() or b in p["codigo_interno"].lower() or (p.get("ean") and b in p["ean"].lower())]
@@ -125,7 +87,9 @@ def _inv():
         est=float(p["quantidade_total_secundaria"]); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
         estp=est/fat if fat else 0; txt,cls=status_estoque(est,minp,fat)
         cat=(p.get("categorias") or {}).get("nome","—"); up_lbl=sigla_para_opcao(p["unidade_primaria"]); us_lbl=sigla_para_opcao(p["unidade_secundaria"])
-        rows+=f'<tr><td><strong>{p["nome"]}</strong></td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span></td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
+        res_qtd=reservas.get(p["id"],0.0) if ver_reserva else 0.0
+        res_html=f'<br><span style="font-size:.7rem;color:var(--warn);font-weight:600;">🔒 Reservado: {qtd_br(res_qtd)} {us_lbl}</span>' if res_qtd>0 else ''
+        rows+=f'<tr><td><strong>{p["nome"]}</strong></td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span>{res_html}</td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
     vz='<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
     st.markdown(f'<table class="tbl"><thead><tr><th>Produto</th><th>Código</th><th>EAN</th><th>Categoria</th><th>Estoque</th><th>Mínimo</th><th>Status</th></tr></thead><tbody>{rows or vz}</tbody></table>',unsafe_allow_html=True)
 
