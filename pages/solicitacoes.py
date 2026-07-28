@@ -428,7 +428,8 @@ def _aprovar_unificado():
             sol    = s.get("sol")     or {}
             un_lbl = sigla_para_opcao(s.get("unidade_informada", "UN"))
             disp   = estoque_disponivel(prod.get("id", ""))
-            cor_disp = "var(--ok)" if disp >= float(s["quantidade_convertida"]) else "var(--err)"
+            qtd_original = float(s["quantidade_convertida"])
+            cor_disp = "var(--ok)" if disp >= qtd_original else "var(--err)"
 
             c1, c2, c3, c4 = st.columns([4, 3, 1, 1])
             with c1:
@@ -443,21 +444,43 @@ def _aprovar_unificado():
                 if s.get("observacao"):
                     st.caption(f"Obs: {esc_trunc(s['observacao'], 60)}")
             with c2:
-                st.markdown(f"**{qtd_br(s['quantidade_informada'])} {un_lbl}**")
+                st.markdown(f"**Solicitado: {qtd_br(qtd_original)} {un_lbl}**")
                 st.markdown(
                     f"<span style='font-size:.75rem;color:{cor_disp};'>"
                     f"Restante no Estoque: {qtd_br(disp)} {un_lbl}</span>",
                     unsafe_allow_html=True,
                 )
+                qtd_max = qtd_original + disp
+                qtd_aprovada = st.number_input(
+                    f"Quantidade a aprovar ({un_lbl})",
+                    min_value=0.0, max_value=float(qtd_max) if qtd_max > 0 else 0.0,
+                    value=qtd_original, step=1.0,
+                    key=f"qtd_aprov_{s['id']}",
+                    help="Ajuste para mais ou para menos, se necessário. A diferença é liberada/descontada do estoque na aprovação.",
+                )
+                motivo_ajuste = ""
+                if qtd_aprovada != qtd_original:
+                    motivo_ajuste = st.text_input(
+                        "Motivo do ajuste *",
+                        key=f"motivo_aprov_{s['id']}",
+                        placeholder="Por que a quantidade está sendo alterada?",
+                    )
             with c3:
                 if st.button("✅", key=f"a_{s['id']}", help="Aprovar"):
-                    st.session_state["conf_sol"] = {
-                        "id": s["id"], "tipo": "almox", "acao": "aprovar",
-                        "prod": prod.get("nome", "—"),
-                        "qtd": qtd_br(s["quantidade_informada"]), "un": un_lbl,
-                        "nick": sol.get("nick", ""),
-                    }
-                    st.rerun()
+                    if qtd_aprovada != qtd_original and not motivo_ajuste.strip():
+                        st.error("Informe o motivo do ajuste de quantidade antes de aprovar.")
+                    else:
+                        st.session_state["conf_sol"] = {
+                            "id": s["id"], "tipo": "almox", "acao": "aprovar",
+                            "prod": prod.get("nome", "—"),
+                            "qtd": qtd_br(s["quantidade_informada"]), "un": un_lbl,
+                            "nick": sol.get("nick", ""),
+                            "qtd_original": qtd_original,
+                            "qtd_aprovada": qtd_aprovada,
+                            "motivo_ajuste": motivo_ajuste.strip(),
+                            "obs_original": s.get("observacao") or "",
+                        }
+                        st.rerun()
             with c4:
                 if st.button("❌", key=f"r_{s['id']}", help="Rejeitar"):
                     st.session_state["conf_sol"] = {
@@ -698,6 +721,13 @@ def _popup_confirmacao(u):
     tipo     = conf.get("tipo", "almox")
     tipo_lbl = "Solicitação de Compra" if tipo == "compra" else "Solicitação ao Almoxarifado"
     qtd_info = f"<b>Qtd:</b> {conf['qtd']} {conf['un']}<br>" if conf.get("qtd") else ""
+    ajuste_info = ""
+    if tipo == "almox" and conf.get("qtd_aprovada") is not None and conf["qtd_aprovada"] != conf.get("qtd_original"):
+        ajuste_info = (
+            f'<b>⚠️ Quantidade ajustada:</b> {qtd_br(conf["qtd_original"])} → '
+            f'<strong style="color:var(--warn);">{qtd_br(conf["qtd_aprovada"])}</strong> {conf["un"]}<br>'
+            f'<b>Motivo do ajuste:</b> {esc(conf.get("motivo_ajuste",""))}<br>'
+        )
 
     st.markdown(
         f'<div style="background:{cor};border:2px solid {borda};border-radius:10px;'
@@ -708,6 +738,7 @@ def _popup_confirmacao(u):
         f'<div style="font-size:.85rem;color:var(--t2);line-height:1.8;">'
         f'<b>Produto:</b> {esc(conf["prod"])}<br>'
         f'{qtd_info}'
+        f'{ajuste_info}'
         f'<b>Solicitante:</b> {esc(conf["nick"])}'
         f'</div>'
         f'</div>',
@@ -755,6 +786,16 @@ def _popup_confirmacao(u):
                 }
                 if acao == "rejeitar":
                     dados["motivo_rejeicao"] = motivo_rej.strip()
+
+                if (acao == "aprovar" and conf.get("qtd_aprovada") is not None
+                        and conf["qtd_aprovada"] != conf.get("qtd_original")):
+                    nota = (f'[AJUSTE NA APROVAÇÃO] Quantidade solicitada '
+                            f'{qtd_br(conf["qtd_original"])} → aprovada {qtd_br(conf["qtd_aprovada"])} '
+                            f'{conf["un"]}. Motivo: {conf.get("motivo_ajuste","")}')
+                    obs_atual = (conf.get("obs_original") or "").strip()
+                    dados["quantidade_informada"]  = conf["qtd_aprovada"]
+                    dados["quantidade_convertida"]  = conf["qtd_aprovada"]
+                    dados["observacao"]             = f"{obs_atual}\n{nota}" if obs_atual else nota
 
                 sb = get_sb()
                 resp = sb.table("movimentacoes").update(dados).eq("id", conf["id"]).execute()
