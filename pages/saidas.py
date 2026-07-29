@@ -237,9 +237,166 @@ def _compras_admin():
 def tela_saida_manual():
     st.markdown('<div class="pg">', unsafe_allow_html=True)
     st.markdown('<div class="pg-title">📤 Saída Manual</div><div class="pg-sub">Saída direta sem aprovação prévia</div>', unsafe_allow_html=True)
-    t1, t2 = st.tabs(["Executar","Histórico"])
+    t1, t2, t3 = st.tabs(["Executar","Saída em Lote por Setor","Histórico"])
     with t1: _form_manual()
-    with t2: _tbl(listar_movimentacoes(tipo="saida", tipo_saida="MANUAL"))
+    with t2: _form_lote()
+    with t3: _tbl(listar_movimentacoes(tipo="saida", tipo_saida="MANUAL"))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ══ SAÍDA EM LOTE POR SETOR ═══════════════════════════════════════
+
+_N_LINHAS_LOTE = 20
+_LOTE_NENHUM = "— selecionar produto —"
+
+
+def _form_lote():
+    u = sessao(); prods = listar_produtos(); sets = listar_setores()
+    if not prods: st.warning("Nenhum produto cadastrado."); return
+    pm = {f"{p['nome']} ({p['codigo_interno']})": p for p in prods}
+    sn = [s["nome"] for s in sets] or ["Sem setor"]
+
+    def _limpar_estado_lote():
+        for i in range(_N_LINHAS_LOTE):
+            st.session_state.pop(f"lt_p{i}", None)
+            st.session_state.pop(f"lt_q{i}", None)
+        st.session_state.pop("lote_setor", None)
+        st.session_state.pop("lote_nome", None)
+        st.session_state.pop("lote_motivo", None)
+
+    # Tela de sucesso
+    if st.session_state.get("lote_ok"):
+        info = st.session_state["lote_ok"]
+        linhas_itens = "".join(
+            f'<div style="font-size:.8rem;color:var(--t3);">↳ {esc(it["nome"])}: '
+            f'<strong>{qtd_br(it["qtd"])} {sigla_para_opcao(it["un"])}</strong></div>'
+            for it in info["itens"]
+        )
+        st.markdown(
+            f'<div style="background:var(--ok-bg);border:2px solid rgba(22,163,74,.3);'
+            f'border-radius:12px;padding:2rem;text-align:center;margin:1rem 0;">'
+            f'<div style="font-size:2.5rem;margin-bottom:.5rem;">✅</div>'
+            f'<div style="font-size:1.2rem;font-weight:700;color:var(--ok);margin-bottom:.5rem;">Saída em Lote Registrada com Sucesso!</div>'
+            f'<div style="font-size:.85rem;color:var(--t2);margin-bottom:.4rem;">Setor: <strong>{esc(info["setor"])}</strong></div>'
+            f'{linhas_itens}'
+            f'<div style="font-size:.8rem;color:var(--t3);margin-top:.4rem;">'
+            f'Retirante: {esc(info["retirante"])} &nbsp;|&nbsp; Por: <strong>{esc(u.get("nick",""))}</strong></div></div>',
+            unsafe_allow_html=True)
+        if st.button("➕ Realizar Nova Saída em Lote", type="primary", key="lote_novo"):
+            del st.session_state["lote_ok"]; _limpar_estado_lote(); st.rerun()
+        return
+
+    # Confirmação
+    if st.session_state.get("confirmar_lote"):
+        d = st.session_state["confirmar_lote"]
+        linhas_conf = "".join(
+            f"<br>&nbsp;&nbsp;↳ {esc(it['prod']['nome'])}: {qtd_br(it['qtd'])} {sigla_para_opcao(it['prod'].get('unidade_secundaria','UN'))}"
+            for it in d["itens"]
+        )
+        st.markdown(
+            f'<div style="background:var(--warn-bg);border:2px solid rgba(217,119,6,.35);'
+            f'border-radius:10px;padding:1.4rem 1.6rem;margin:1rem 0;">'
+            f'<div style="font-size:1rem;font-weight:700;color:var(--warn);margin-bottom:.8rem;">⚠️ Confirmar Saída em Lote</div>'
+            f'<div style="font-size:.85rem;color:var(--t2);line-height:1.8;">'
+            f'<b>Setor:</b> {esc(d["setor"])}<br>'
+            f'<b>Itens:</b>{linhas_conf}<br>'
+            f'<b>Retirante:</b> {esc(d["nome_r"])}<br>'
+            f'<b>Motivo:</b> {esc(d["motivo"])}</div></div>',
+            unsafe_allow_html=True)
+        cs, cn, _ = st.columns([1,1,3])
+        with cs:
+            if st.button("✅ SIM, confirmar", type="primary", use_container_width=True, key="lote_conf_sim"):
+                ts = agora_iso()
+                for it in d["itens"]:
+                    registrar_movimentacao({
+                        "produto_id":            it["prod"]["id"],
+                        "tipo":                  "saida",
+                        "tipo_saida":            "MANUAL",
+                        "status":                "concluido",
+                        "quantidade_informada":  it["qtd"],
+                        "unidade_informada":     it["prod"].get("unidade_secundaria","UN"),
+                        "quantidade_convertida": it["qtd"],
+                        "setor_solicitante":     d["setor"],
+                        "nome_solicitante":      d["nome_r"],
+                        "nick_solicitante":      u["nick"],
+                        "motivo_saida":          d["motivo"],
+                        "usuario_executor":      u["id"],
+                        "data_movimentacao":     ts,
+                    })
+                st.session_state["lote_ok"] = {
+                    "setor":     d["setor"],
+                    "retirante": d["nome_r"],
+                    "itens":     [{"nome": it["prod"]["nome"], "qtd": it["qtd"], "un": it["prod"].get("unidade_secundaria","UN")} for it in d["itens"]],
+                }
+                del st.session_state["confirmar_lote"]; st.rerun()
+        with cn:
+            if st.button("❌ NÃO, voltar", use_container_width=True, key="lote_conf_nao"):
+                del st.session_state["confirmar_lote"]; st.rerun()
+        return
+
+    # Formulário
+    st.markdown('<div class="card"><div class="card-h">📦 Saída em Lote por Setor</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:.78rem;color:var(--t3);margin-bottom:.6rem;">'
+        f'Selecione o setor de destino e preencha até {_N_LINHAS_LOTE} produtos com suas respectivas quantidades.</div>',
+        unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        setor = st.selectbox("Setor *", sn, key="lote_setor")
+        nome_r = st.text_input("Retirante *", key="lote_nome")
+    with c2:
+        motivo = st.text_area("Motivo *", height=68, key="lote_motivo")
+
+    st.markdown(
+        '<div style="font-size:.78rem;font-weight:700;color:var(--t3);'
+        'letter-spacing:.05em;text-transform:uppercase;margin:.8rem 0 .2rem;">Itens</div>',
+        unsafe_allow_html=True)
+    _ch1, _ch2 = st.columns([3, 1])
+    with _ch1: st.markdown('<div style="font-size:.75rem;color:var(--t3);padding-bottom:.1rem;">Produto</div>', unsafe_allow_html=True)
+    with _ch2: st.markdown('<div style="font-size:.75rem;color:var(--t3);padding-bottom:.1rem;">Qtd</div>', unsafe_allow_html=True)
+
+    opts_prod = [_LOTE_NENHUM] + list(pm.keys())
+    linhas = []
+    for i in range(_N_LINHAS_LOTE):
+        c_p, c_q = st.columns([3, 1])
+        with c_p:
+            p_sel = st.selectbox(
+                f"Produto {i+1}", opts_prod, key=f"lt_p{i}", label_visibility="collapsed")
+        with c_q:
+            q_sel = st.number_input(
+                "Qtd", min_value=0.0, value=0.0, step=1.0, key=f"lt_q{i}", label_visibility="collapsed")
+        linhas.append((p_sel, q_sel))
+
+    if st.button("Registrar Saída em Lote →", type="primary", use_container_width=True, key="btn_lote_saida"):
+        agregados = {}
+        for p_sel, q_sel in linhas:
+            if p_sel != _LOTE_NENHUM and q_sel > 0:
+                prod = pm[p_sel]
+                agr = agregados.setdefault(prod["id"], {"prod": prod, "qtd": 0.0})
+                agr["qtd"] += q_sel
+
+        erros = []
+        if not nome_r.strip():  erros.append("Nome obrigatório.")
+        if not motivo.strip():  erros.append("Motivo obrigatório.")
+        if not agregados:       erros.append("Informe pelo menos um produto com quantidade maior que zero.")
+        for agr in agregados.values():
+            disp = float(agr["prod"]["quantidade_total_secundaria"])
+            if disp < agr["qtd"]:
+                un_lbl = sigla_para_opcao(agr["prod"].get("unidade_secundaria","UN"))
+                erros.append(f"Estoque insuficiente para {agr['prod']['nome']}. Disponível: {qtd_br(disp)} {un_lbl}.")
+
+        if erros:
+            for e in erros: st.error(e)
+        else:
+            st.session_state["confirmar_lote"] = {
+                "setor":   setor,
+                "nome_r":  nome_r.strip(),
+                "motivo":  motivo.strip(),
+                "itens":   list(agregados.values()),
+            }
+            st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 
