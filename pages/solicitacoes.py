@@ -478,7 +478,6 @@ def _aprovar_unificado():
                             "qtd_original": qtd_original,
                             "qtd_aprovada": qtd_aprovada,
                             "motivo_ajuste": motivo_ajuste.strip(),
-                            "obs_original": s.get("observacao") or "",
                         }
                         st.rerun()
             with c4:
@@ -789,13 +788,14 @@ def _popup_confirmacao(u):
 
                 if (acao == "aprovar" and conf.get("qtd_aprovada") is not None
                         and conf["qtd_aprovada"] != conf.get("qtd_original")):
-                    nota = (f'[AJUSTE NA APROVAÇÃO] Quantidade solicitada '
-                            f'{qtd_br(conf["qtd_original"])} → aprovada {qtd_br(conf["qtd_aprovada"])} '
-                            f'{conf["un"]}. Motivo: {conf.get("motivo_ajuste","")}')
-                    obs_atual = (conf.get("obs_original") or "").strip()
+                    # Registrado no mesmo campo (motivo_saida) usado pela Saída Manual,
+                    # com o histórico de quanto foi solicitado x aprovado para rastreabilidade.
+                    nota = (f'Ajustado na aprovação: {qtd_br(conf["qtd_original"])} → '
+                            f'{qtd_br(conf["qtd_aprovada"])} {conf["un"]}. '
+                            f'Motivo: {conf.get("motivo_ajuste","")}')
                     dados["quantidade_informada"]  = conf["qtd_aprovada"]
                     dados["quantidade_convertida"]  = conf["qtd_aprovada"]
-                    dados["observacao"]             = f"{obs_atual}\n{nota}" if obs_atual else nota
+                    dados["motivo_saida"]           = nota
 
                 sb = get_sb()
                 resp = sb.table("movimentacoes").update(dados).eq("id", conf["id"]).execute()
@@ -836,6 +836,9 @@ def _hist_completo():
             if m.get("status") == "rejeitado" and m.get("motivo_rejeicao"):
                 motivo_html = (f'<br><span style="font-size:.7rem;color:var(--err);">'
                                f'💬 {esc_trunc(m["motivo_rejeicao"], 50)}</span>')
+            elif origem == "almox" and m.get("motivo_saida"):
+                motivo_html = (f'<br><span style="font-size:.7rem;color:var(--warn);">'
+                               f'✏️ {esc_trunc(m["motivo_saida"], 50)}</span>')
 
             if origem == "almox":
                 prod   = m.get("produto") or {}
