@@ -602,14 +602,17 @@ def tela_saida_aprovada():
             for m in conc:
                 prod = m.get("produto") or {}; un_lbl = sigla_para_opcao(m.get("unidade_informada","UN"))
                 aut = (m.get("aut") or {}).get("nick","—"); exe = (m.get("exe") or {}).get("nick","—")
+                mot = (m.get("motivo_saida") or "—")
+                mot = mot[:40] + ("…" if len(mot) > 40 else "")
                 rows += (f'<tr><td style="color:var(--t3);font-size:.73rem;">{datahora_br(m["criado_em"])}</td>'
                          f'<td><strong>{esc(prod.get("nome","—"))}</strong></td>'
                          f'<td>{qtd_br(m["quantidade_informada"])} {un_lbl}</td>'
                          f'<td>{esc(m.get("setor_solicitante","—"))}</td>'
                          f'<td>{esc(m.get("nome_solicitante","—"))}</td>'
                          f'<td style="color:var(--ok);">{aut}</td>'
-                         f'<td style="color:var(--info);">{exe}</td></tr>')
-            st.markdown(f'<table class="tbl"><thead><tr><th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th><th>Retirante</th><th>Aprovador</th><th>Executor</th></tr></thead><tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+                         f'<td style="color:var(--info);">{exe}</td>'
+                         f'<td style="color:var(--t3);font-size:.73rem;">{esc(mot)}</td></tr>')
+            st.markdown(f'<table class="tbl"><thead><tr><th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th><th>Retirante</th><th>Aprovador</th><th>Executor</th><th>Motivo (se ajustado)</th></tr></thead><tbody>{rows}</tbody></table>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
