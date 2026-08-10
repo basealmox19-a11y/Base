@@ -38,6 +38,5 @@ def pode(acao):
         "solicitar":      ["admin","almoxarife","usuario"],
         "solicitacoes":   ["admin","almoxarife","usuario"],
         "aprovar":        ["admin"],
-        "previsao_demanda": ["admin","almoxarife"],
     }
     return p in m.get(acao, [])
