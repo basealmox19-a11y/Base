@@ -20,6 +20,7 @@ from collections import defaultdict
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from openpyxl.utils import get_column_letter
 from utils.database import historico_saidas_previsao
 from utils.auth import pode
 from utils.ui import kpi_html
@@ -248,7 +249,7 @@ def _tab_produto(produtos):
         rows += (
             f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
             f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])}</span></td>'
-            f'<td>{qtd_br(p["estoque_atual"])} {p["unidade"]}</td>'
+            f'<td>{qtd_br(p["estoque_atual"])} {esc(p["unidade"])}</td>'
             f'<td>{qtd_br(p["previsao_30d"]) if p["previsao_30d"] is not None else "—"}</td>'
             f'<td>{qtd_br(p["ponto_pedido"]) if p["ponto_pedido"] is not None else "—"}</td>'
             f'<td style="color:var(--err);font-weight:700;">{_fmt_mes(p["data_pedido"])}</td>'
@@ -314,13 +315,28 @@ def _tab_setor(setores):
 
 # ── Exportação (recalculada a cada execução — sempre reflete o histórico atual) ──
 def _autoajustar_colunas(ws, df):
+    """Usa iteração Python pura (não vetorizada) para evitar o bug do pandas 3.0
+    (backend Arrow) onde .astype(str).map(len) quebra em colunas com valores None
+    misturados a números — None não é convertido para string antes do .map()."""
     for i, col in enumerate(df.columns):
-        largura = max((df[col].astype(str).map(len).max() if not df.empty else 0), len(col)) + 2
-        ws.column_dimensions[chr(65 + i)].width = largura
+        maior = max((len(str(v)) for v in df[col].tolist()), default=0)
+        largura = max(maior, len(str(col))) + 2
+        ws.column_dimensions[get_column_letter(i + 1)].width = largura
+
+_CARACTERES_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+def _sanitizar_celula(v):
+    """Neutraliza injeção de fórmula em Excel (CSV/XLSX Formula Injection): se um
+    nome de produto, código ou setor vindo do banco começar com um caractere que o
+    Excel interpretaria como início de fórmula, prefixa com apóstrofo para forçar
+    texto puro. Protege contra vazamento de dados via fórmulas como
+    =WEBSERVICE(...) ou =cmd|... embutidas em cadastros."""
+    if isinstance(v, str) and v.startswith(_CARACTERES_FORMULA):
+        return "'" + v
+    return v
 
 def _planilha_setor(setores):
     df = pd.DataFrame([{
-        "Setor": s["setor"],
+        "Setor": _sanitizar_celula(s["setor"]),
         "Consumo médio mensal": round(s["consumo_medio_mensal"], 2),
         "Previsão 30 dias": round(s["previsao_30d"], 2),
         "Previsão 12 meses (com sazonalidade BF)": round(s["previsao_12m"], 2),
@@ -334,7 +350,7 @@ def _planilha_setor(setores):
 
 def _planilha_produto(produtos):
     df = pd.DataFrame([{
-        "Código": p["codigo"], "Produto": p["nome"],
+        "Código": _sanitizar_celula(p["codigo"]), "Produto": _sanitizar_celula(p["nome"]),
         "Estoque atual": round(p["estoque_atual"], 2), "Unidade": p["unidade"],
         "Consumo diário médio": round(p["consumo_diario"], 3),
         "Previsão 30 dias": round(p["previsao_30d"], 2) if p["previsao_30d"] is not None else None,
