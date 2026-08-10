@@ -81,7 +81,7 @@ def topbar(pagina,usuario):
     MENU=[("Dashboard","dashboard",True),("Entrada","entrada",pode("entrada")),
           ("Solicitações","solicitacoes",pode("solicitar")),("Saída Manual","saida_manual",pode("saida_manual")),
           ("Saída Aprovada","saida_aprovada",pode("saida_aprovada")),("Estoque","estoque",pode("estoque")),
-          ("Notas Fiscais","notas",pode("notas")),("Controle","controle",True),
+          ("Notas Fiscais","notas",pode("notas")),("Previsão","previsao_demanda",pode("previsao_demanda")),
           ("Usuários","usuarios",pode("usuarios")),
           ("Configurações","configuracoes",pode("configuracoes"))]
     itens=[(l,d) for l,d,v in MENU if v]
