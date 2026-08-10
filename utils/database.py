@@ -441,3 +441,23 @@ def historico_consumo_mensal(meses: int = 24) -> list:
     except Exception as e:
         _log.error("historico_consumo_mensal: %s", e)
         return []
+
+def historico_saidas_previsao(dias: int = 120) -> list:
+    """Retorna saídas concluídas dos últimos N dias, com produto e setor,
+    para alimentar o módulo de previsão de demanda (pages/previsao.py).
+    Exclui ajustes manuais (tipo_saida é None nesses casos — ver estoque.py)."""
+    try:
+        from datetime import datetime, timedelta
+        lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
+        return (get_sb().table("movimentacoes")
+                .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
+                        "produto:produtos(id,nome,codigo_interno,unidade_secundaria,"
+                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao)")
+                .eq("tipo","saida").eq("status","concluido")
+                .not_.is_("tipo_saida","null")
+                .gte("criado_em", lim)
+                .order("criado_em", desc=False)
+                .execute().data or [])
+    except Exception as e:
+        _log.error("historico_saidas_previsao: %s", e)
+        return []
