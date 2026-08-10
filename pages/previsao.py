@@ -35,7 +35,7 @@ FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ 
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
 DIAS_HISTORICO = 120                       # janela de coleta (~4 meses, cobre os ~3 meses disponíveis hoje)
 DIAS_SEGURANCA_PADRAO = 3
-LEAD_TIME_PADRAO_DIAS = 7
+LEAD_TIME_PADRAO_DIAS = 10
 _NOMES_MES = ["", "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 
 
