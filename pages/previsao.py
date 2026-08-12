@@ -29,9 +29,11 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 # ── Parâmetros do modelo (ajustáveis) ─────────────────────────────
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
-DIAS_HISTORICO = 120                       # janela de coleta (~4 meses, cobre os ~2 meses disponíveis hoje)
-DIAS_SEGURANCA_PADRAO = 5
-LEAD_TIME_PADRAO_DIAS = 10
+DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico de movimentações já registrado
+                                            # (a sazonalidade acima é a ÚNICA variação aplicada fora da média real;
+                                            #  a média-base nunca é inflada, só o período de Out/Nov/Dez na projeção)
+DIAS_SEGURANCA_PADRAO = 3
+LEAD_TIME_PADRAO_DIAS = 7
 HORIZONTE_SIMULACAO_DIAS = 400             # até onde a simulação dia-a-dia procura pedido/ruptura
 SEMANAS_GRAFICO_PRODUTO = 16
 SEMANAS_PREVISAO_SETOR = 8
@@ -211,7 +213,7 @@ def _kpis(produtos):
     sem_dados = sum(1 for p in produtos if p["previsao_30d"] is None)
     st.markdown(
         f'<div class="kpis" style="grid-template-columns:repeat(3,1fr);margin:.7rem 0 1rem;">'
-        f'{kpi_html("Previsão consumo (30d)", qtd_br(total_30d), "", "var(--t2)")}'
+        f'{kpi_html("Previsão consumo (30d)", qtd_br(round(total_30d)), "", "var(--t2)")}'
         f'{kpi_html("Pedido necessário em ≤30d", urgentes, "", "var(--err)")}'
         f'{kpi_html("Sem histórico suficiente", sem_dados, "", "var(--warn)")}'
         f'</div>', unsafe_allow_html=True)
@@ -221,8 +223,8 @@ def _tab_produto(produtos):
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
         f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])}</span></td>'
-        f'<td>{qtd_br(p["estoque_atual"])} {esc(p["unidade"])}</td>'
-        f'<td>{qtd_br(p["previsao_30d"]) if p["previsao_30d"] is not None else "—"}</td>'
+        f'<td>{qtd_br(round(p["estoque_atual"]))} {esc(p["unidade"])}</td>'
+        f'<td>{qtd_br(round(p["previsao_30d"])) if p["previsao_30d"] is not None else "—"}</td>'
         f'<td style="color:var(--err);font-weight:700;">{_fmt_data(p["data_pedido"])}</td>'
         f'<td>{_fmt_data(p["data_ruptura"])}</td></tr>'
         for p in produtos)
@@ -357,9 +359,9 @@ def _sanitizar_celula(v):
 def _planilha_setor(resumo_setores):
     df = pd.DataFrame([{
         "Setor": _sanitizar_celula(s["setor"]),
-        "Consumo diário médio": round(s["consumo_diario"], 3),
-        "Previsão 30 dias": round(s["previsao_30d"], 2),
-        "Previsão 12 meses (com sazonalidade BF)": round(s["previsao_12m"], 2),
+        "Consumo diário médio": round(s["consumo_diario"]),
+        "Previsão 30 dias": round(s["previsao_30d"]),
+        "Previsão 12 meses (com sazonalidade BF)": round(s["previsao_12m"]),
     } for s in resumo_setores])
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
@@ -371,9 +373,9 @@ def _planilha_setor(resumo_setores):
 def _planilha_produto(produtos):
     df = pd.DataFrame([{
         "Código": _sanitizar_celula(p["codigo"]), "Produto": _sanitizar_celula(p["nome"]),
-        "Estoque atual": round(p["estoque_atual"], 2), "Unidade": p["unidade"],
-        "Consumo diário médio": round(p["consumo_diario"], 3),
-        "Previsão 30 dias": round(p["previsao_30d"], 2) if p["previsao_30d"] is not None else None,
+        "Estoque atual": round(p["estoque_atual"]), "Unidade": p["unidade"],
+        "Consumo diário médio": round(p["consumo_diario"]),
+        "Previsão 30 dias": round(p["previsao_30d"]) if p["previsao_30d"] is not None else None,
         "Ponto de Pedido": _fmt_data(p["data_pedido"]),
         "Ruptura Prevista": _fmt_data(p["data_ruptura"]),
     } for p in produtos])
