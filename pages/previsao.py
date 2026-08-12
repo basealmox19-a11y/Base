@@ -32,8 +32,8 @@ PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, D
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico de movimentações já registrado
                                             # (a sazonalidade acima é a ÚNICA variação aplicada fora da média real;
                                             #  a média-base nunca é inflada, só o período de Out/Nov/Dez na projeção)
-DIAS_SEGURANCA_PADRAO = 3
-LEAD_TIME_PADRAO_DIAS = 7
+DIAS_SEGURANCA_PADRAO = 5
+LEAD_TIME_PADRAO_DIAS = 10
 HORIZONTE_SIMULACAO_DIAS = 400             # até onde a simulação dia-a-dia procura pedido/ruptura
 SEMANAS_GRAFICO_PRODUTO = 16
 SEMANAS_PREVISAO_SETOR = 8
