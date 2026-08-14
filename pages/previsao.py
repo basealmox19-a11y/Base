@@ -41,7 +41,7 @@ FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ 
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
 DIAS_UTEIS_MES = 24                        # 5 dias úteis + sábado (meio expediente) — ver cálculo no docstring
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
-DIAS_SEGURANCA_PADRAO = 3
+DIAS_SEGURANCA_PADRAO = 5
 LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
 HORIZONTE_SIMULACAO_DIAS = 400
 MESES_PROJECAO_FUTUROS = 12
