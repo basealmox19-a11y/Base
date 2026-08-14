@@ -1,23 +1,33 @@
-"""pages/previsao.py — Previsão de demanda (30 dias) com sazonalidade de Black Friday
+"""pages/previsao.py — Previsão de demanda com sazonalidade de Black Friday
 
 Modelo (documentado aqui de propósito — é a peça mais sensível do módulo):
-  • Consumo-base: média móvel simples das semanas COMPLETAS de histórico. O sistema
-    tem só ~2 meses de implantação — curto demais para uma tendência linear ser
-    confiável, por isso o método é média simples por semana, não regressão.
-  • Sazonalidade de Black Friday: como ainda não há histórico próprio de Out/Nov/Dez,
-    aplica-se um fator de mercado pesquisado (ver FATOR_SAZONAL_BF), dia a dia,
-    conforme o mês de cada dia projetado.
-  • Ponto de pedido e ruptura prevista: simulação dia a dia do saldo de estoque a
-    partir do consumo diário médio — recalculada do zero a cada execução da tela,
-    então reflete automaticamente qualquer movimentação de saída nova. Datas
-    exibidas em dd/mm/aaaa.
+  • Dias úteis/mês = 24. Cálculo: ano tem ~365,25 dias ÷ 7 = 52,18 semanas/ano ÷ 12
+    = 4,35 semanas/mês. Semana = 5 dias cheios (seg-sex) + sábado com expediente
+    reduzido (meio período, conta 0,5) + domingo fechado (0) → 5,5 dias-úteis-
+    equivalentes/semana. 4,35 × 5,5 = 23,9 → arredonda para 24.
+  • Consumo-base: total consumido no MÊS DE REFERÊNCIA (o último mês calendário
+    fechado antes de hoje — hoje é ago/26, então o mês de referência é jul/26,
+    e rola automaticamente a cada mês) dividido por 24. Resultado = "taxa de dia
+    útil pleno" (consumo esperado numa segunda-a-sexta comum).
+  • Consumo diário projetado = taxa_dia_util_pleno × peso do dia da semana
+    (seg-sex=1,0 · sáb=0,5 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam
+    o fator de Black Friday — a média-base nunca é inflada por ele).
+  • Ponto de pedido e ruptura: simulação dia a dia a partir de hoje, recalculada
+    do zero a cada execução — reflete qualquer movimentação nova. Datas em
+    dd/mm/aaaa.
+  • Nível de serviço: reconstrução retroativa do saldo (a partir do estoque
+    atual, andando para trás pelas movimentações) para checar se cada entrada
+    real ocorreu em até N dias (lead time configurado) depois do saldo
+    reconstruído cruzar o ponto de pedido atual. É uma aproximação — assume que
+    o ponto de pedido de hoje também valia no passado, na ausência de um
+    histórico de saldo diário armazenado.
 """
-import streamlit as st, datetime, io
+import streamlit as st, datetime, io, calendar
 from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
 from openpyxl.utils import get_column_letter
-from utils.database import historico_saidas_previsao
+from utils.database import historico_saidas_previsao, historico_entradas_previsao
 from utils.auth import pode
 from utils.ui import kpi_html
 from utils.fmt import qtd_br
@@ -29,14 +39,13 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 # ── Parâmetros do modelo (ajustáveis) ─────────────────────────────
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
-DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico de movimentações já registrado
-                                            # (a sazonalidade acima é a ÚNICA variação aplicada fora da média real;
-                                            #  a média-base nunca é inflada, só o período de Out/Nov/Dez na projeção)
-DIAS_SEGURANCA_PADRAO = 5
-LEAD_TIME_PADRAO_DIAS = 10
-HORIZONTE_SIMULACAO_DIAS = 400             # até onde a simulação dia-a-dia procura pedido/ruptura
-SEMANAS_GRAFICO_PRODUTO = 16
-SEMANAS_PREVISAO_SETOR = 8
+DIAS_UTEIS_MES = 24                        # 5 dias úteis + sábado (meio expediente) — ver cálculo no docstring
+DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
+DIAS_SEGURANCA_PADRAO = 3
+LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
+HORIZONTE_SIMULACAO_DIAS = 400
+MESES_PROJECAO_FUTUROS = 12
+_NOMES_MES = ["", "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 
 
 def tela_previsao_demanda():
@@ -46,7 +55,7 @@ def tela_previsao_demanda():
 
     st.markdown('<div class="pg">', unsafe_allow_html=True)
     st.markdown('<div class="pg-title">📈 Previsão de Demanda</div>'
-                 '<div class="pg-sub">Previsão de 30 dias por média móvel semanal, com sazonalidade de Black Friday</div>',
+                 '<div class="pg-sub">Baseada no último mês fechado (24 dias úteis/mês), com sazonalidade de Black Friday</div>',
                  unsafe_allow_html=True)
 
     with st.spinner("Calculando previsão..."):
@@ -59,21 +68,25 @@ def tela_previsao_demanda():
 
     c1, c2 = st.columns(2)
     with c1:
-        lead_time = st.number_input("Tempo médio de reposição (dias)", min_value=1,
+        lead_time = st.number_input("Lead time de reposição (dias)", min_value=1,
                                      value=LEAD_TIME_PADRAO_DIAS, step=1,
-                                     help="Tempo entre o pedido de compra e a chegada do produto no almoxarifado.")
+                                     help="Tempo entre o pedido de compra e a chegada do produto. Também usado para medir o nível de serviço.")
     with c2:
         dias_seg = st.number_input("Estoque de segurança (dias de consumo)", min_value=0,
                                     value=DIAS_SEGURANCA_PADRAO, step=1)
 
+    ano_ref, mes_ref = _mes_referencia()
+    st.caption(f"Mês de referência do consumo-base: {_NOMES_MES[mes_ref]}/{str(ano_ref)[2:]} "
+               f"(último mês calendário fechado)")
+
     produtos = _calcular_previsao_produtos(base, lead_time, dias_seg)
     resumo_setores = _calcular_resumo_setores(base)
 
-    _kpis(produtos)
+    _kpis(produtos, base, lead_time)
 
     tabs = st.tabs(["Por produto", "Por setor", "Exportar"])
     with tabs[0]: _tab_produto(produtos)
-    with tabs[1]: _tab_setor(base)
+    with tabs[1]: _tab_setor(base, produtos)
     with tabs[2]: _tab_exportar(produtos, resumo_setores)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -82,8 +95,11 @@ def tela_previsao_demanda():
 # ── Coleta e agregação ─────────────────────────────────────────────
 def _montar_base():
     hist = historico_saidas_previsao(DIAS_HISTORICO)
+    entradas = historico_entradas_previsao(DIAS_HISTORICO)
+
     produtos_map = {}
     setor_movs = defaultdict(list)
+    setor_produto_map = defaultdict(dict)
     for m in hist:
         prod = m.get("produto") or {}
         pid = prod.get("id") or m.get("produto_id")
@@ -92,69 +108,89 @@ def _montar_base():
             continue
         qtd = float(m.get("quantidade_convertida") or 0)
         setor = m.get("setor_solicitante") or "Sem setor"
-        p = produtos_map.setdefault(pid, {"info": prod, "movs": []})
         item = {"data": data, "qtd": qtd}
+        p = produtos_map.setdefault(pid, {"info": prod, "movs": []})
         p["movs"].append(item)
         setor_movs[setor].append(item)
-    return {"produtos": produtos_map, "setores": dict(setor_movs)}
+        sp = setor_produto_map[setor].setdefault(pid, {"movs": []})
+        sp["movs"].append(item)
+
+    entradas_map = defaultdict(list)
+    for e in entradas:
+        pid = e.get("produto_id")
+        data = (e.get("criado_em") or "")[:10]
+        if not pid or not data:
+            continue
+        entradas_map[pid].append({"data": data, "qtd": float(e.get("quantidade_convertida") or 0)})
+
+    return {"produtos": produtos_map, "setores": dict(setor_movs),
+            "setor_produto": dict(setor_produto_map), "entradas": dict(entradas_map)}
+
+def _extrair_categoria(info):
+    c = info.get("categorias")
+    if isinstance(c, dict):
+        return c.get("nome") or "Sem categoria"
+    if isinstance(c, list) and c:
+        return (c[0] or {}).get("nome") or "Sem categoria"
+    return "Sem categoria"
 
 
-# ── Semana ISO (chave = segunda-feira daquela semana) ─────────────
-def _semana_inicio(ano, semana):
-    return datetime.date.fromisocalendar(ano, semana, 1)
+# ── Calendário: mês de referência, fim de mês, soma de meses ─────
+def _add_meses(ano, mes, n):
+    total = (mes - 1) + n
+    return ano + total // 12, total % 12 + 1
 
-def _semana_atual():
+def _mes_referencia():
+    """Último mês calendário FECHADO antes de hoje — rola automaticamente a cada mês."""
     hoje = datetime.date.today()
-    ano, semana, _ = hoje.isocalendar()
-    return _semana_inicio(ano, semana)
+    return _add_meses(hoje.year, hoje.month, -1)
 
-def _serie_semanal(movs):
-    """Agrupa quantidade por semana (chave = segunda-feira da semana ISO)."""
-    porw = defaultdict(float)
+def _fim_do_mes(ano, mes):
+    return datetime.date(ano, mes, calendar.monthrange(ano, mes)[1])
+
+def _consumo_mes(movs, ano, mes):
+    total = 0.0
     for m in movs:
         d = datetime.date.fromisoformat(m["data"])
-        ano, semana, _ = d.isocalendar()
-        porw[_semana_inicio(ano, semana)] += m["qtd"]
-    return dict(sorted(porw.items()))
+        if d.year == ano and d.month == mes:
+            total += m["qtd"]
+    return total
 
-def _consumo_diario_medio(movs):
-    """Média móvel simples: média das semanas COMPLETAS de histórico, convertida
-    para consumo/dia. A semana corrente (em andamento) é excluída para não
-    distorcer a média com um período parcial."""
-    if not movs:
-        return 0.0
-    serie = _serie_semanal(movs)
-    atual = _semana_atual()
-    completas = {k: v for k, v in serie.items() if k != atual}
-    if completas:
-        return (sum(completas.values()) / len(completas)) / 7
-    # só há dado na semana corrente (produto novo) — usa a taxa observada até agora
-    datas = sorted(m["data"] for m in movs)
-    dias = (datetime.date.fromisoformat(datas[-1]) - datetime.date.fromisoformat(datas[0])).days + 1
-    return sum(m["qtd"] for m in movs) / max(dias, 1)
+def _taxa_mensal_referencia(movs):
+    """Consumo do mês de referência ÷ 24 dias úteis = taxa de dia útil pleno."""
+    ano_ref, mes_ref = _mes_referencia()
+    consumo = _consumo_mes(movs, ano_ref, mes_ref)
+    return (consumo / DIAS_UTEIS_MES) if consumo > 0 else 0.0
 
 
-# ── Sazonalidade e simulação dia a dia ────────────────────────────
+# ── Sazonalidade, peso do dia da semana e simulação dia a dia ────
 def _mult_sazonal(dia):
     return 1 + FATOR_SAZONAL_BF * PESO_SAZONAL_MES.get(dia.month, 0.0)
 
-def _previsao_periodo(daily_rate, dias):
-    hoje = datetime.date.today()
-    return sum(daily_rate * _mult_sazonal(hoje + datetime.timedelta(days=i)) for i in range(1, dias + 1))
+def _peso_dia_semana(dia):
+    wd = dia.weekday()          # 0=seg ... 6=dom
+    if wd == 6: return 0.0      # domingo — fechado
+    if wd == 5: return 0.5      # sábado — expediente reduzido
+    return 1.0                  # segunda a sexta — dia cheio
 
-def _simular(estoque_atual, daily_rate, lead_time, dias_seg):
-    """Simula o saldo de estoque dia a dia a partir de amanhã, aplicando a
-    sazonalidade de cada dia, até encontrar a data exata de pedido e de ruptura."""
-    if daily_rate <= 0:
+def _consumo_dia(taxa_dia_util_pleno, dia):
+    return taxa_dia_util_pleno * _mult_sazonal(dia) * _peso_dia_semana(dia)
+
+def _previsao_periodo(taxa_dia_util_pleno, dias):
+    hoje = datetime.date.today()
+    return sum(_consumo_dia(taxa_dia_util_pleno, hoje + datetime.timedelta(days=i)) for i in range(1, dias + 1))
+
+def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg):
+    if taxa_dia_util_pleno <= 0:
         return {"ponto_pedido_qtd": None, "previsao_30d": None, "data_pedido": None, "data_ruptura": None}
-    ponto_pedido_qtd = daily_rate * (lead_time + dias_seg)
+    ponto_pedido_qtd = taxa_dia_util_pleno * (lead_time + dias_seg)
     hoje = datetime.date.today()
     saldo = estoque_atual
     data_pedido = data_ruptura = None
     previsao_30d = 0.0
     for i in range(1, HORIZONTE_SIMULACAO_DIAS + 1):
         dia = hoje + datetime.timedelta(days=i)
-        consumo = daily_rate * _mult_sazonal(dia)
+        consumo = _consumo_dia(taxa_dia_util_pleno, dia)
         if i <= 30:
             previsao_30d += consumo
         anterior = saldo
@@ -168,19 +204,46 @@ def _simular(estoque_atual, daily_rate, lead_time, dias_seg):
     return {"ponto_pedido_qtd": ponto_pedido_qtd, "previsao_30d": previsao_30d,
             "data_pedido": data_pedido, "data_ruptura": data_ruptura}
 
+def _forecast_mensal(taxa_dia_util_pleno):
+    """Mês em vigor (parcial, do dia seguinte até o fim do mês) + 12 meses completos."""
+    if taxa_dia_util_pleno <= 0:
+        return []
+    hoje = datetime.date.today()
+    resultado = []
+    cursor = hoje + datetime.timedelta(days=1)
+    fim_mes_atual = _fim_do_mes(hoje.year, hoje.month)
+    total = 0.0
+    while cursor <= fim_mes_atual:
+        total += _consumo_dia(taxa_dia_util_pleno, cursor)
+        cursor += datetime.timedelta(days=1)
+    resultado.append({"ano": hoje.year, "mes": hoje.month, "valor": total})
+
+    ano, mes = _add_meses(hoje.year, hoje.month, 1)
+    for _ in range(MESES_PROJECAO_FUTUROS):
+        d_fim = _fim_do_mes(ano, mes)
+        cursor = datetime.date(ano, mes, 1)
+        total = 0.0
+        while cursor <= d_fim:
+            total += _consumo_dia(taxa_dia_util_pleno, cursor)
+            cursor += datetime.timedelta(days=1)
+        resultado.append({"ano": ano, "mes": mes, "valor": total})
+        ano, mes = _add_meses(ano, mes, 1)
+    return resultado
+
 
 # ── Cálculo por produto ──────────────────────────────────────────
 def _calcular_previsao_produtos(base, lead_time, dias_seg):
     out = []
     for pid, p in base["produtos"].items():
         info, movs = p["info"], p["movs"]
-        daily_rate = _consumo_diario_medio(movs)
+        taxa = _taxa_mensal_referencia(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
-        sim = _simular(estoque_atual, daily_rate, lead_time, dias_seg)
+        sim = _simular(estoque_atual, taxa, lead_time, dias_seg)
         out.append({
             "id": pid, "nome": info.get("nome", "—"), "codigo": info.get("codigo_interno", "—"),
-            "unidade": info.get("unidade_secundaria", "UN"), "estoque_atual": estoque_atual,
-            "consumo_diario": daily_rate, "serie_semanal": _serie_semanal(movs),
+            "unidade": info.get("unidade_secundaria", "UN"), "categoria": _extrair_categoria(info),
+            "estoque_atual": estoque_atual, "consumo_diario": taxa, "movs": movs,
+            "forecast_mensal": _forecast_mensal(taxa),
             "previsao_30d": sim["previsao_30d"], "ponto_pedido_qtd": sim["ponto_pedido_qtd"],
             "data_pedido": sim["data_pedido"], "data_ruptura": sim["data_ruptura"],
         })
@@ -192,101 +255,166 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
 def _calcular_resumo_setores(base):
     out = []
     for setor, movs in base["setores"].items():
-        daily_rate = _consumo_diario_medio(movs)
+        taxa = _taxa_mensal_referencia(movs)
         out.append({
-            "setor": setor, "consumo_diario": daily_rate,
-            "previsao_30d": _previsao_periodo(daily_rate, 30) if daily_rate > 0 else 0.0,
-            "previsao_12m": _previsao_periodo(daily_rate, 365) if daily_rate > 0 else 0.0,
+            "setor": setor, "consumo_diario": taxa,
+            "previsao_30d": _previsao_periodo(taxa, 30) if taxa > 0 else 0.0,
+            "previsao_12m": _previsao_periodo(taxa, 365) if taxa > 0 else 0.0,
         })
     out.sort(key=lambda s: -s["previsao_12m"])
     return out
 
 
-# ── UI ────────────────────────────────────────────────────────────
+# ── Nível de serviço (reconstrução retroativa do saldo) ───────────
+def _nivel_servico(produtos, base, lead_time):
+    entradas_por_produto = base.get("entradas", {})
+    total = no_prazo = 0
+    for p in produtos:
+        if p["ponto_pedido_qtd"] is None:
+            continue
+        evs_entrada = entradas_por_produto.get(p["id"], [])
+        if not evs_entrada:
+            continue
+        eventos = [{"data": m["data"], "tipo": "saida", "qtd": m["qtd"]} for m in p["movs"]]
+        eventos += [{"data": e["data"], "tipo": "entrada", "qtd": e["qtd"]} for e in evs_entrada]
+
+        saldo = p["estoque_atual"]
+        pontos = [(datetime.date.today(), saldo)]
+        for ev in sorted(eventos, key=lambda e: e["data"], reverse=True):
+            if ev["tipo"] == "saida":
+                saldo += ev["qtd"]      # saldo ANTES desta saída era maior
+            else:
+                saldo -= ev["qtd"]      # saldo ANTES desta entrada era menor
+            pontos.append((datetime.date.fromisoformat(ev["data"]), saldo))
+        pontos.sort(key=lambda x: x[0])  # crescente por data
+
+        cursor_desde = None  # marca a entrada anterior, pra não reaproveitar um cruzamento já resolvido
+        for e in sorted(evs_entrada, key=lambda x: x["data"]):
+            data_entrada = datetime.date.fromisoformat(e["data"])
+            gatilho = None
+            for d, s in pontos:
+                if cursor_desde is not None and d <= cursor_desde:
+                    continue
+                if d > data_entrada:
+                    break
+                if s <= p["ponto_pedido_qtd"]:
+                    gatilho = d
+                    break  # primeira data em que cruzou — é o gatilho real, não a última antes da entrada
+            total += 1
+            if gatilho is None:
+                no_prazo += 1  # reposição preventiva, feita antes de cruzar o ponto de pedido
+            elif (data_entrada - gatilho).days <= lead_time:
+                no_prazo += 1
+            cursor_desde = data_entrada
+    return round(100 * no_prazo / total) if total else None
+
+def _cobertura_media(produtos):
+    hoje = datetime.date.today()
+    dias = [(p["data_ruptura"] - hoje).days for p in produtos if p["data_ruptura"]]
+    return round(sum(dias) / len(dias)) if dias else None
+
+
+# ── UI: cabeçalho / KPIs ───────────────────────────────────────────
 def _fmt_data(d):
     return d.strftime("%d/%m/%Y") if d else "—"
 
-def _kpis(produtos):
+def _status_reposicao(p, hoje):
+    if p["data_pedido"] is None:
+        return "Sem dados suficientes", "var(--t3)"
+    dias = (p["data_pedido"] - hoje).days
+    if dias <= 0:
+        return "Repor agora", "var(--err)"
+    if dias <= 30:
+        return "Repor em breve", "var(--warn)"
+    return "OK", "var(--ok)"
+
+def _kpis(produtos, base, lead_time):
     hoje = datetime.date.today()
-    total_30d = sum(p["previsao_30d"] or 0 for p in produtos)
-    urgentes = sum(1 for p in produtos if p["data_pedido"] and (p["data_pedido"] - hoje).days <= 30)
-    sem_dados = sum(1 for p in produtos if p["previsao_30d"] is None)
+    repor_30d = sum(1 for p in produtos if p["data_pedido"] and (p["data_pedido"] - hoje).days <= 30)
+    cobertura = _cobertura_media(produtos)
+    nivel = _nivel_servico(produtos, base, lead_time)
+    cor_nivel = "var(--ok)" if (nivel or 0) >= 90 else ("var(--warn)" if nivel is not None else "var(--t3)")
     st.markdown(
         f'<div class="kpis" style="grid-template-columns:repeat(3,1fr);margin:.7rem 0 1rem;">'
-        f'{kpi_html("Previsão consumo (30d)", qtd_br(round(total_30d)), "", "var(--t2)")}'
-        f'{kpi_html("Pedido necessário em ≤30d", urgentes, "", "var(--err)")}'
-        f'{kpi_html("Sem histórico suficiente", sem_dados, "", "var(--warn)")}'
+        f'{kpi_html("Reposição necessária em 30d", repor_30d, "a partir de hoje", "var(--err)")}'
+        f'{kpi_html("Cobertura média do estoque", f"{cobertura} dias" if cobertura is not None else "—", "", "var(--t2)")}'
+        f'{kpi_html("Nível de serviço", f"{nivel}%" if nivel is not None else "—", f"lead time de {lead_time}d", cor_nivel)}'
         f'</div>', unsafe_allow_html=True)
 
+
+# ── Aba Por produto — com filtro de categoria ─────────────────────
 def _tab_produto(produtos):
     st.markdown('<div class="card"><div class="card-h">Previsão por produto (SKU)</div>', unsafe_allow_html=True)
+    categorias = ["Todas"] + sorted({p["categoria"] for p in produtos})
+    cat_sel = st.selectbox("Categoria", categorias, key="prev_cat_sel")
+    produtos_f = produtos if cat_sel == "Todas" else [p for p in produtos if p["categoria"] == cat_sel]
+
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
-        f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])}</span></td>'
+        f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span></td>'
         f'<td>{qtd_br(round(p["estoque_atual"]))} {esc(p["unidade"])}</td>'
         f'<td>{qtd_br(round(p["previsao_30d"])) if p["previsao_30d"] is not None else "—"}</td>'
         f'<td style="color:var(--err);font-weight:700;">{_fmt_data(p["data_pedido"])}</td>'
         f'<td>{_fmt_data(p["data_ruptura"])}</td></tr>'
-        for p in produtos)
+        for p in produtos_f)
     st.markdown(
         f'<table class="tbl"><thead><tr><th>Produto</th><th>Estoque atual</th>'
         f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th></tr></thead>'
         f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    opcoes = {p["nome"]: p for p in produtos if p["consumo_diario"] > 0}
+    opcoes = {p["nome"]: p for p in produtos_f if p["consumo_diario"] > 0}
     if opcoes:
         st.markdown('<div class="card" style="margin-top:1rem;">'
-                     '<div class="card-h">Simulação de estoque</div>', unsafe_allow_html=True)
+                     '<div class="card-h">Simulação de estoque — mês em vigor + 12 meses</div>', unsafe_allow_html=True)
         sel = st.selectbox("Produto", list(opcoes.keys()), key="prev_sel_prod")
         _grafico_produto(opcoes[sel])
         st.markdown("</div>", unsafe_allow_html=True)
 
 def _grafico_produto(p):
-    hoje = datetime.date.today()
-    hist_items = sorted(p["serie_semanal"].items())
-    hist_x = [d.strftime("%d/%m") for d, _ in hist_items]
+    hist_por_mes = defaultdict(float)
+    for m in p["movs"]:
+        d = datetime.date.fromisoformat(m["data"])
+        hist_por_mes[(d.year, d.month)] += m["qtd"]
+    hist_items = sorted(hist_por_mes.items())
+    hist_x = [f'{_NOMES_MES[mes]}/{str(ano)[2:]}' for (ano, mes), _ in hist_items]
     hist_y = [v for _, v in hist_items]
 
+    forecast = p["forecast_mensal"]
+    fc_x = [f'{_NOMES_MES[f["mes"]]}/{str(f["ano"])[2:]}' for f in forecast]
+    fc_y = [f["valor"] for f in forecast]
     saldo = p["estoque_atual"]
-    proj_x, proj_y = [], []
-    cursor = _semana_atual()
-    for _s in range(SEMANAS_GRAFICO_PRODUTO):
-        for j in range(7):
-            dia = cursor + datetime.timedelta(days=j)
-            if dia > hoje:
-                saldo = max(saldo - p["consumo_diario"] * _mult_sazonal(dia), 0.0)
-        proj_x.append(cursor.strftime("%d/%m"))
-        proj_y.append(saldo)
-        cursor += datetime.timedelta(days=7)
+    traj_y = []
+    for f in forecast:
+        saldo = max(saldo - f["valor"], 0.0)
+        traj_y.append(saldo)
 
-    ordem_x = hist_x + [x for x in proj_x if x not in hist_x]
+    ordem_x = hist_x + [x for x in fc_x if x not in hist_x]
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=hist_x, y=hist_y, name="Consumo semanal (real)", marker_color="rgba(120,120,120,.5)"))
-    fig.add_trace(go.Scatter(x=proj_x, y=proj_y, name="Estoque projetado", mode="lines+markers",
+    fig.add_trace(go.Bar(x=hist_x, y=hist_y, name="Consumo mensal (real)", marker_color="rgba(120,120,120,.5)"))
+    fig.add_trace(go.Bar(x=fc_x, y=fc_y, name="Consumo previsto", marker_color="rgba(204,0,0,.55)"))
+    fig.add_trace(go.Scatter(x=fc_x, y=traj_y, name="Estoque projetado", mode="lines+markers",
                               line=dict(color="#CC0000", width=2), yaxis="y2"))
     if p["ponto_pedido_qtd"] is not None:
-        fig.add_trace(go.Scatter(x=proj_x, y=[p["ponto_pedido_qtd"]] * len(proj_x), name="Ponto de pedido ideal",
+        fig.add_trace(go.Scatter(x=fc_x, y=[p["ponto_pedido_qtd"]] * len(fc_x), name="Ponto de pedido ideal",
                                   mode="lines", line=dict(color="#B45309", width=1.5, dash="dash"), yaxis="y2"))
     if p["data_pedido"]:
-        d_pedido = p["data_pedido"]
-        ano, semana, _ = d_pedido.isocalendar()
-        rotulo = _semana_inicio(ano, semana).strftime("%d/%m")
+        rotulo = f'{_NOMES_MES[p["data_pedido"].month]}/{str(p["data_pedido"].year)[2:]}'
         if rotulo in ordem_x:
             fig.add_vline(x=rotulo, line_width=1, line_dash="dot", line_color="#B45309")
             fig.add_annotation(x=rotulo, y=1, yref="paper", showarrow=False,
-                                text=f"Pedido em {_fmt_data(d_pedido)}", font=dict(size=10, color="#B45309"))
-    fig.update_layout(**_PL, height=320, legend=dict(bgcolor="rgba(0,0,0,0)"),
+                                text=f"Pedido em {_fmt_data(p['data_pedido'])}", font=dict(size=10, color="#B45309"))
+    fig.update_layout(**_PL, height=340, barmode="overlay", legend=dict(bgcolor="rgba(0,0,0,0)"),
                        xaxis=dict(type="category", categoryorder="array", categoryarray=ordem_x),
-                       yaxis=dict(title=f'Consumo semanal ({p["unidade"]})', gridcolor="rgba(0,0,0,.05)"),
+                       yaxis=dict(title=f'Consumo mensal ({p["unidade"]})', gridcolor="rgba(0,0,0,.05)"),
                        yaxis2=dict(title="Estoque projetado", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)"))
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ── Aba Por setor — filtro individual + período, sem consolidação ─
-def _tab_setor(base):
-    st.markdown('<div class="card"><div class="card-h">Previsão por setor</div>', unsafe_allow_html=True)
+# ── Aba Por setor — filtro individual + tabela de ressuprimento ──
+def _tab_setor(base, produtos):
+    st.markdown('<div class="card"><div class="card-h">Consumo por setor</div>', unsafe_allow_html=True)
     setores_disponiveis = sorted(base["setores"].keys())
     if not setores_disponiveis:
         st.info("Sem dados de consumo por setor no período.")
@@ -297,51 +425,77 @@ def _tab_setor(base):
     with c1:
         setor_sel = st.selectbox("Setor", setores_disponiveis, key="prev_setor_sel")
 
-    movs = base["setores"][setor_sel]
-    datas = sorted(datetime.date.fromisoformat(m["data"]) for m in movs)
+    movs_setor = base["setores"][setor_sel]
+    datas = sorted(datetime.date.fromisoformat(m["data"]) for m in movs_setor)
     with c2:
         intervalo = st.date_input("Período", value=(datas[0], datas[-1]),
                                    min_value=datas[0], max_value=datas[-1], key="prev_setor_periodo")
-
     if isinstance(intervalo, tuple) and len(intervalo) == 2:
         d_ini, d_fim = intervalo
     else:
         d_ini, d_fim = datas[0], datas[-1]
 
-    movs_filtrados = [m for m in movs if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
-    daily_rate = _consumo_diario_medio(movs)  # taxa sobre TODO o histórico do setor, não sobre o filtro de exibição
-    _grafico_setor(movs_filtrados, daily_rate)
+    movs_filtrados = [m for m in movs_setor if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
+    taxa_setor = _taxa_mensal_referencia(movs_setor)
+    _grafico_setor(movs_filtrados, taxa_setor)
     st.markdown("</div>", unsafe_allow_html=True)
 
-def _grafico_setor(movs_filtrados, daily_rate):
-    hist_items = sorted(_serie_semanal(movs_filtrados).items())
-    hist_x = [d.strftime("%d/%m") for d, _ in hist_items]
+    st.markdown('<div class="card" style="margin-top:1rem;">'
+                 '<div class="card-h">Itens consumidos por este setor — previsão de ressuprimento</div>', unsafe_allow_html=True)
+    produtos_by_id = {p["id"]: p for p in produtos}
+    itens_setor = base["setor_produto"].get(setor_sel, {})
+    hoje = datetime.date.today()
+    linhas = ""
+    for pid, sp in itens_setor.items():
+        prod_geral = produtos_by_id.get(pid)
+        if not prod_geral:
+            continue
+        qtd_periodo = sum(m["qtd"] for m in sp["movs"] if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim)
+        if qtd_periodo <= 0:
+            continue
+        status, cor = _status_reposicao(prod_geral, hoje)
+        linhas += (
+            f'<tr><td><strong>{esc(prod_geral["nome"])}</strong></td>'
+            f'<td>{qtd_br(round(qtd_periodo))} {esc(prod_geral["unidade"])}</td>'
+            f'<td>{_fmt_data(prod_geral["data_pedido"])}</td>'
+            f'<td><span style="color:{cor};font-weight:700;">{status}</span></td></tr>'
+        )
+    if linhas:
+        st.markdown(
+            f'<table class="tbl"><thead><tr><th>Item</th><th>Consumido no período</th>'
+            f'<th>Reposição prevista em</th><th>Situação</th></tr></thead><tbody>{linhas}</tbody></table>',
+            unsafe_allow_html=True)
+    else:
+        st.info("Nenhum item com consumo no período selecionado.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def _grafico_setor(movs_filtrados, taxa_setor):
+    hist_por_mes = defaultdict(float)
+    for m in movs_filtrados:
+        d = datetime.date.fromisoformat(m["data"])
+        hist_por_mes[(d.year, d.month)] += m["qtd"]
+    hist_items = sorted(hist_por_mes.items())
+    hist_x = [f'{_NOMES_MES[mes]}/{str(ano)[2:]}' for (ano, mes), _ in hist_items]
     hist_y = [v for _, v in hist_items]
 
-    proj_x, proj_y = [], []
-    cursor = _semana_atual()
-    for _s in range(SEMANAS_PREVISAO_SETOR):
-        total_semana = sum(daily_rate * _mult_sazonal(cursor + datetime.timedelta(days=j)) for j in range(7))
-        proj_x.append(cursor.strftime("%d/%m"))
-        proj_y.append(total_semana)
-        cursor += datetime.timedelta(days=7)
+    forecast = _forecast_mensal(taxa_setor)
+    fc_x = [f'{_NOMES_MES[f["mes"]]}/{str(f["ano"])[2:]}' for f in forecast]
+    fc_y = [f["valor"] for f in forecast]
 
-    ordem_x = hist_x + [x for x in proj_x if x not in hist_x]
+    ordem_x = hist_x + [x for x in fc_x if x not in hist_x]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=hist_x, y=hist_y, name="Consumo real", marker_color="rgba(204,0,0,.55)"))
-    fig.add_trace(go.Scatter(x=proj_x, y=proj_y, name="Consumo previsto", mode="lines+markers",
+    fig.add_trace(go.Scatter(x=fc_x, y=fc_y, name="Consumo previsto", mode="lines+markers",
                               line=dict(color="#F2C94C", width=2.5)))
     fig.update_layout(**_PL, height=320, legend=dict(bgcolor="rgba(0,0,0,0)"),
                        xaxis=dict(type="category", categoryorder="array", categoryarray=ordem_x),
-                       yaxis=dict(title="Consumo semanal", gridcolor="rgba(0,0,0,.05)"))
+                       yaxis=dict(title="Consumo mensal", gridcolor="rgba(0,0,0,.05)"))
     st.plotly_chart(fig, use_container_width=True)
 
 
 # ── Exportação (recalculada a cada execução — sempre reflete o histórico atual) ──
 def _autoajustar_colunas(ws, df):
-    """Iteração Python pura (não vetorizada) — evita o bug do pandas 3.0 (backend
-    Arrow) onde .astype(str).map(len) quebra em colunas com None misturado a números."""
     for i, col in enumerate(df.columns):
         maior = max((len(str(v)) for v in df[col].tolist()), default=0)
         largura = max(maior, len(str(col))) + 2
@@ -349,9 +503,6 @@ def _autoajustar_colunas(ws, df):
 
 _CARACTERES_FORMULA = ("=", "+", "-", "@", "\t", "\r")
 def _sanitizar_celula(v):
-    """Neutraliza injeção de fórmula em Excel: se um nome de produto, código ou
-    setor vindo do banco começar com um caractere que o Excel interpreta como
-    início de fórmula, prefixa com apóstrofo para forçar texto puro."""
     if isinstance(v, str) and v.startswith(_CARACTERES_FORMULA):
         return "'" + v
     return v
@@ -373,6 +524,7 @@ def _planilha_setor(resumo_setores):
 def _planilha_produto(produtos):
     df = pd.DataFrame([{
         "Código": _sanitizar_celula(p["codigo"]), "Produto": _sanitizar_celula(p["nome"]),
+        "Categoria": _sanitizar_celula(p["categoria"]),
         "Estoque atual": round(p["estoque_atual"]), "Unidade": p["unidade"],
         "Consumo diário médio": round(p["consumo_diario"]),
         "Previsão 30 dias": round(p["previsao_30d"]) if p["previsao_30d"] is not None else None,
