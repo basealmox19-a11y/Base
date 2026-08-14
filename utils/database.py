@@ -442,8 +442,8 @@ def historico_consumo_mensal(meses: int = 24) -> list:
         _log.error("historico_consumo_mensal: %s", e)
         return []
 
-def historico_saidas_previsao(dias: int = 120) -> list:
-    """Retorna saídas concluídas dos últimos N dias, com produto e setor,
+def historico_saidas_previsao(dias: int = 3650) -> list:
+    """Retorna saídas concluídas dos últimos N dias, com produto, categoria e setor,
     para alimentar o módulo de previsão de demanda (pages/previsao.py).
     Exclui ajustes manuais (tipo_saida é None nesses casos — ver estoque.py)."""
     try:
@@ -452,7 +452,7 @@ def historico_saidas_previsao(dias: int = 120) -> list:
         return (get_sb().table("movimentacoes")
                 .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
                         "produto:produtos(id,nome,codigo_interno,unidade_secundaria,"
-                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao)")
+                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,categorias(nome))")
                 .eq("tipo","saida").eq("status","concluido")
                 .not_.is_("tipo_saida","null")
                 .gte("criado_em", lim)
@@ -460,4 +460,22 @@ def historico_saidas_previsao(dias: int = 120) -> list:
                 .execute().data or [])
     except Exception as e:
         _log.error("historico_saidas_previsao: %s", e)
+        return []
+
+def historico_entradas_previsao(dias: int = 3650) -> list:
+    """Retorna entradas concluídas dos últimos N dias (exclui ajustes manuais),
+    usadas para reconstruir o saldo histórico e medir o nível de serviço de
+    reposição no módulo de previsão de demanda (pages/previsao.py)."""
+    try:
+        from datetime import datetime, timedelta
+        lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
+        return (get_sb().table("movimentacoes")
+                .select("criado_em,produto_id,quantidade_convertida")
+                .eq("tipo","entrada").eq("status","concluido")
+                .or_("tipo_entrada.is.null,tipo_entrada.neq.Ajuste Manual")
+                .gte("criado_em", lim)
+                .order("criado_em", desc=False)
+                .execute().data or [])
+    except Exception as e:
+        _log.error("historico_entradas_previsao: %s", e)
         return []
