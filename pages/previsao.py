@@ -22,7 +22,7 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
     o ponto de pedido de hoje também valia no passado, na ausência de um
     histórico de saldo diário armazenado.
 """
-import streamlit as st, datetime, io, calendar
+import streamlit as st, datetime, io, calendar, statistics
 from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
@@ -75,9 +75,8 @@ def tela_previsao_demanda():
         dias_seg = st.number_input("Estoque de segurança (dias de consumo)", min_value=0,
                                     value=DIAS_SEGURANCA_PADRAO, step=1)
 
-    ano_ref, mes_ref = _mes_referencia()
-    st.caption(f"Mês de referência do consumo-base: {_NOMES_MES[mes_ref]}/{str(ano_ref)[2:]} "
-               f"(último mês calendário fechado)")
+    st.caption("Consumo-base: média móvel ponderada dos meses fechados (peso maior para os mais "
+               "recentes), com expurgo de meses atípicos antes do cálculo.")
 
     produtos = _calcular_previsao_produtos(base, lead_time, dias_seg)
     resumo_setores = _calcular_resumo_setores(base)
@@ -140,27 +139,58 @@ def _add_meses(ano, mes, n):
     total = (mes - 1) + n
     return ano + total // 12, total % 12 + 1
 
-def _mes_referencia():
-    """Último mês calendário FECHADO antes de hoje — rola automaticamente a cada mês."""
-    hoje = datetime.date.today()
-    return _add_meses(hoje.year, hoje.month, -1)
-
 def _fim_do_mes(ano, mes):
     return datetime.date(ano, mes, calendar.monthrange(ano, mes)[1])
 
-def _consumo_mes(movs, ano, mes):
-    total = 0.0
+def _meses_completos(movs):
+    """Totais mensais de TODOS os meses fechados (exclui o mês corrente, em
+    andamento), ordenados do mais antigo pro mais recente."""
+    hoje = datetime.date.today()
+    mes_atual = (hoje.year, hoje.month)
+    por_mes = defaultdict(float)
     for m in movs:
         d = datetime.date.fromisoformat(m["data"])
-        if d.year == ano and d.month == mes:
-            total += m["qtd"]
-    return total
+        por_mes[(d.year, d.month)] += m["qtd"]
+    por_mes.pop(mes_atual, None)
+    return dict(sorted(por_mes.items()))
 
-def _taxa_mensal_referencia(movs):
-    """Consumo do mês de referência ÷ 24 dias úteis = taxa de dia útil pleno."""
-    ano_ref, mes_ref = _mes_referencia()
-    consumo = _consumo_mes(movs, ano_ref, mes_ref)
-    return (consumo / DIAS_UTEIS_MES) if consumo > 0 else 0.0
+def _expurgar_outliers(valores):
+    """Remove meses de consumo zero (não representativos — normalmente ruptura
+    de estoque, não ausência de demanda). Com 4+ meses restantes, remove também
+    outliers estatísticos via z-score modificado (Iglewicz-Hoaglin: 0,6745×
+    (x-mediana)/MAD, limiar 3,5) — método robusto pra séries curtas, não exige
+    distribuição normal. Retorna os ÍNDICES mantidos, na ordem cronológica original."""
+    idx_validos = [i for i, v in enumerate(valores) if v > 0]
+    if len(idx_validos) < 4:
+        return idx_validos
+    vals = [valores[i] for i in idx_validos]
+    mediana = statistics.median(vals)
+    mad = statistics.median([abs(v - mediana) for v in vals])
+    if mad == 0:
+        # MAD degenera a zero quando a maioria dos meses é idêntica — cai pra uma
+        # regra de razão simples (fora de 0,5x–2x a mediana é expurgado)
+        mantidos = [i for i in idx_validos if 0.5 * mediana <= valores[i] <= 2 * mediana]
+    else:
+        mantidos = [i for i in idx_validos if abs(0.6745 * (valores[i] - mediana) / mad) <= 3.5]
+    return mantidos if mantidos else idx_validos
+
+def _taxa_mensal_ponderada(movs):
+    """Média móvel ponderada dos meses fechados (após expurgo de outliers), com
+    peso crescente por recência (peso 1 pro mais antigo mantido, até peso N pro
+    mais recente) — meses recentes pesam mais que meses antigos na taxa final.
+    Retorna a taxa de dia útil pleno (÷24) e um resumo do que foi usado/expurgado."""
+    por_mes = _meses_completos(movs)
+    if not por_mes:
+        return 0.0, {"considerados": 0, "expurgados": 0}
+    valores = list(por_mes.values())
+    mantidos_idx = _expurgar_outliers(valores)
+    if not mantidos_idx:
+        return 0.0, {"considerados": 0, "expurgados": len(valores)}
+    pesos = list(range(1, len(mantidos_idx) + 1))  # cronológico -> mais recente = maior peso
+    soma_pesos = sum(pesos)
+    media_ponderada = sum(valores[idx] * peso for idx, peso in zip(mantidos_idx, pesos)) / soma_pesos
+    taxa = media_ponderada / DIAS_UTEIS_MES
+    return taxa, {"considerados": len(mantidos_idx), "expurgados": len(valores) - len(mantidos_idx)}
 
 
 # ── Sazonalidade, peso do dia da semana e simulação dia a dia ────
@@ -236,13 +266,13 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
     out = []
     for pid, p in base["produtos"].items():
         info, movs = p["info"], p["movs"]
-        taxa = _taxa_mensal_referencia(movs)
+        taxa, expurgo = _taxa_mensal_ponderada(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
         sim = _simular(estoque_atual, taxa, lead_time, dias_seg)
         out.append({
             "id": pid, "nome": info.get("nome", "—"), "codigo": info.get("codigo_interno", "—"),
             "unidade": info.get("unidade_secundaria", "UN"), "categoria": _extrair_categoria(info),
-            "estoque_atual": estoque_atual, "consumo_diario": taxa, "movs": movs,
+            "estoque_atual": estoque_atual, "consumo_diario": taxa, "movs": movs, "expurgo": expurgo,
             "forecast_mensal": _forecast_mensal(taxa),
             "previsao_30d": sim["previsao_30d"], "ponto_pedido_qtd": sim["ponto_pedido_qtd"],
             "data_pedido": sim["data_pedido"], "data_ruptura": sim["data_ruptura"],
@@ -255,7 +285,7 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
 def _calcular_resumo_setores(base):
     out = []
     for setor, movs in base["setores"].items():
-        taxa = _taxa_mensal_referencia(movs)
+        taxa, _expurgo = _taxa_mensal_ponderada(movs)
         out.append({
             "setor": setor, "consumo_diario": taxa,
             "previsao_30d": _previsao_periodo(taxa, 30) if taxa > 0 else 0.0,
@@ -349,17 +379,25 @@ def _tab_produto(produtos):
     cat_sel = st.selectbox("Categoria", categorias, key="prev_cat_sel")
     produtos_f = produtos if cat_sel == "Todas" else [p for p in produtos if p["categoria"] == cat_sel]
 
+    def _celula_base(p):
+        exp = p["expurgo"]
+        txt = f'{exp["considerados"]} meses'
+        if exp["expurgados"]:
+            txt += f' · {exp["expurgados"]} exp.'
+        return txt
+
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
         f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span></td>'
         f'<td>{qtd_br(round(p["estoque_atual"]))} {esc(p["unidade"])}</td>'
         f'<td>{qtd_br(round(p["previsao_30d"])) if p["previsao_30d"] is not None else "—"}</td>'
         f'<td style="color:var(--err);font-weight:700;">{_fmt_data(p["data_pedido"])}</td>'
-        f'<td>{_fmt_data(p["data_ruptura"])}</td></tr>'
+        f'<td>{_fmt_data(p["data_ruptura"])}</td>'
+        f'<td style="color:var(--t3);font-size:.75rem;">{_celula_base(p)}</td></tr>'
         for p in produtos_f)
     st.markdown(
         f'<table class="tbl"><thead><tr><th>Produto</th><th>Estoque atual</th>'
-        f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th></tr></thead>'
+        f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th><th>Base do cálculo</th></tr></thead>'
         f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -436,7 +474,7 @@ def _tab_setor(base, produtos):
         d_ini, d_fim = datas[0], datas[-1]
 
     movs_filtrados = [m for m in movs_setor if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
-    taxa_setor = _taxa_mensal_referencia(movs_setor)
+    taxa_setor, _expurgo_setor = _taxa_mensal_ponderada(movs_setor)
     _grafico_setor(movs_filtrados, taxa_setor)
     st.markdown("</div>", unsafe_allow_html=True)
 
