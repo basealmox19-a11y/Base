@@ -32,7 +32,7 @@ def main():
 
 def _rota_usuario(u):
     ini=(u.get("nick") or "?")[0].upper()
-    st.markdown(f'<div class="bar"><div class="brand">SFC &nbsp;|&nbsp; ALM</div><div style="display:flex;align-items:center;gap:.5rem;color:rgba(255,255,255,.9);font-size:.76rem;"><span style="color:rgba(255,255,255,.55);font-size:.68rem;">Usuário</span><div class="av">{ini}</div><span style="font-weight:600;">{u.get("nick","")}</span></div></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="bar"><div class="brand">SFC &nbsp;|&nbsp; ALMOXARIFADO</div><div style="display:flex;align-items:center;gap:.5rem;color:rgba(255,255,255,.9);font-size:.76rem;"><span style="color:rgba(255,255,255,.55);font-size:.68rem;">Usuário</span><div class="av">{ini}</div><span style="font-weight:600;">{u.get("nick","")}</span></div></div>',unsafe_allow_html=True)
     st.markdown('<div class="subnav">',unsafe_allow_html=True)
     cols=st.columns(3)
     with cols[0]:
@@ -52,7 +52,7 @@ def _rota_almoxarife(u):
           ("Saída Manual","saida_manual"),("Saída Aprovada","saida_aprovada"),
           ("Estoque","estoque"),("Notas Fiscais","notas"),("Previsão","previsao_demanda")]
     ini=(u.get("nick") or "?")[0].upper()
-    st.markdown(f'<div class="bar"><div class="brand">SFC &nbsp;|&nbsp; ALM</div><div style="display:flex;align-items:center;gap:.5rem;color:rgba(255,255,255,.9);font-size:.76rem;"><span style="color:rgba(255,255,255,.55);font-size:.68rem;">Almoxarife</span><div class="av">{ini}</div><span style="font-weight:600;">{u.get("nick","")}</span></div></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="bar"><div class="brand">SFC &nbsp;|&nbsp; ALMOXARIFADO</div><div style="display:flex;align-items:center;gap:.5rem;color:rgba(255,255,255,.9);font-size:.76rem;"><span style="color:rgba(255,255,255,.55);font-size:.68rem;">Almoxarife</span><div class="av">{ini}</div><span style="font-weight:600;">{u.get("nick","")}</span></div></div>',unsafe_allow_html=True)
     st.markdown('<div class="subnav">',unsafe_allow_html=True)
     cols=st.columns(len(MENU)+1)
     for i,(label,dest) in enumerate(MENU):
