@@ -442,8 +442,8 @@ def historico_consumo_mensal(meses: int = 24) -> list:
         _log.error("historico_consumo_mensal: %s", e)
         return []
 
-def historico_saidas_previsao(dias: int = 3650) -> list:
-    """Retorna saídas concluídas dos últimos N dias, com produto, categoria e setor,
+def historico_saidas_previsao(dias: int = 120) -> list:
+    """Retorna saídas concluídas dos últimos N dias, com produto e setor,
     para alimentar o módulo de previsão de demanda (pages/previsao.py).
     Exclui ajustes manuais (tipo_saida é None nesses casos — ver estoque.py)."""
     try:
@@ -451,8 +451,8 @@ def historico_saidas_previsao(dias: int = 3650) -> list:
         lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
         return (get_sb().table("movimentacoes")
                 .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
-                        "produto:produtos(id,nome,codigo_interno,unidade_secundaria,"
-                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,categorias(nome))")
+                        "produto:produtos(id,nome,codigo_interno,unidade_primaria,unidade_secundaria,"
+                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao)")
                 .eq("tipo","saida").eq("status","concluido")
                 .not_.is_("tipo_saida","null")
                 .gte("criado_em", lim)
@@ -462,10 +462,11 @@ def historico_saidas_previsao(dias: int = 3650) -> list:
         _log.error("historico_saidas_previsao: %s", e)
         return []
 
-def historico_entradas_previsao(dias: int = 3650) -> list:
-    """Retorna entradas concluídas dos últimos N dias (exclui ajustes manuais),
-    usadas para reconstruir o saldo histórico e medir o nível de serviço de
-    reposição no módulo de previsão de demanda (pages/previsao.py)."""
+def historico_entradas_previsao(dias: int = 120) -> list:
+    """Retorna entradas concluídas dos últimos N dias (id do produto, data,
+    quantidade), pra alimentar a reconstrução de nível de serviço em
+    pages/previsao.py. Exclui ajustes manuais (tipo_entrada='Ajuste Manual' —
+    ver estoque.py), mesmo critério usado em historico_saidas_previsao."""
     try:
         from datetime import datetime, timedelta
         lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
