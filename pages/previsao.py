@@ -24,7 +24,7 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
     o ponto de pedido de hoje também valia no passado, na ausência de um
     histórico de saldo diário armazenado.
 """
-import streamlit as st, datetime, io, calendar, statistics
+import streamlit as st, datetime, io, calendar, statistics, math
 from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
@@ -55,7 +55,7 @@ def tela_previsao_demanda():
         return
 
     st.markdown('<div class="pg">', unsafe_allow_html=True)
-    st.markdown('<div class="pg-title">📈 Previsão de Demanda (Em Desenvolvimento)</div>'
+    st.markdown('<div class="pg-title">📈 Previsão de Demanda</div>'
                  '<div class="pg-sub">Baseada nos meses fechados, com dias úteis reais de cada mês (sábado como dia cheio) e sazonalidade de Black Friday</div>',
                  unsafe_allow_html=True)
 
@@ -225,11 +225,32 @@ def _previsao_periodo(taxa_dia_util_pleno, dias):
 
 def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg):
     if taxa_dia_util_pleno <= 0:
-        return {"ponto_pedido_qtd": None, "previsao_30d": None, "data_pedido": None, "data_ruptura": None}
+        return {"ponto_pedido_qtd": None, "previsao_30d": None, "data_pedido": None,
+                "data_ruptura": None, "dias_atraso_pedido": 0, "quantidade_comprar": None}
     ponto_pedido_qtd = taxa_dia_util_pleno * (lead_time + dias_seg)
     hoje = datetime.date.today()
+
+    # Se o estoque de HOJE já está no ponto de pedido ou abaixo dele, o pedido
+    # já deveria ter saído no passado — reconstrói retroativamente (somando de
+    # volta o consumo dia a dia) a data em que o saldo cruzou o ponto de pedido,
+    # pra dizer quantos dias de atraso já existem. Sem isso, a simulação (que só
+    # olha pra frente) nunca encontra essa data e o item simplesmente some do
+    # alerta, mesmo sendo o mais urgente de todos.
+    data_pedido = None
+    dias_atraso_pedido = 0
+    if estoque_atual <= ponto_pedido_qtd:
+        saldo_retro = estoque_atual
+        dia_retro = hoje
+        for _ in range(HORIZONTE_SIMULACAO_DIAS):
+            dia_retro -= datetime.timedelta(days=1)
+            saldo_retro += _consumo_dia(taxa_dia_util_pleno, dia_retro)
+            dias_atraso_pedido += 1
+            if saldo_retro >= ponto_pedido_qtd:
+                break
+        data_pedido = dia_retro
+
     saldo = estoque_atual
-    data_pedido = data_ruptura = None
+    data_ruptura = hoje if estoque_atual <= 0 else None
     previsao_30d = 0.0
     for i in range(1, HORIZONTE_SIMULACAO_DIAS + 1):
         dia = hoje + datetime.timedelta(days=i)
@@ -244,8 +265,19 @@ def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg):
             data_ruptura = dia
         if data_pedido and data_ruptura:
             break
+
+    # Quantidade a comprar: cobre o consumo esperado até a chegada do pedido
+    # (lead time) e ainda deixa o estoque de segurança reconstituído na chegada
+    # — ou seja, repõe até o nível em que o PRÓXIMO ponto de pedido só seria
+    # cruzado de novo depois de mais um ciclo de lead time.
+    quantidade_comprar = 0.0
+    if estoque_atual <= ponto_pedido_qtd:
+        nivel_alvo = ponto_pedido_qtd + taxa_dia_util_pleno * lead_time
+        quantidade_comprar = max(0.0, nivel_alvo - estoque_atual)
+
     return {"ponto_pedido_qtd": ponto_pedido_qtd, "previsao_30d": previsao_30d,
-            "data_pedido": data_pedido, "data_ruptura": data_ruptura}
+            "data_pedido": data_pedido, "data_ruptura": data_ruptura,
+            "dias_atraso_pedido": dias_atraso_pedido, "quantidade_comprar": quantidade_comprar}
 
 def _forecast_mensal(taxa_dia_util_pleno):
     """Mês em vigor (parcial, do dia seguinte até o fim do mês) + 12 meses completos."""
@@ -281,14 +313,23 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
         info, movs = p["info"], p["movs"]
         taxa, expurgo = _taxa_mensal_ponderada(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
+        fator = float(info.get("fator_conversao") or 1) or 1.0
         sim = _simular(estoque_atual, taxa, lead_time, dias_seg)
+        qtd_comprar_sec = sim["quantidade_comprar"] or 0.0
+        # arredonda pra cima: não dá pra comprar fração da unidade primária (caixa, fardo, etc.)
+        qtd_comprar_prim = math.ceil(qtd_comprar_sec / fator - 1e-9) if qtd_comprar_sec > 0 else 0
         out.append({
             "id": pid, "nome": info.get("nome", "—"), "codigo": info.get("codigo_interno", "—"),
-            "unidade": info.get("unidade_secundaria", "UN"), "categoria": _extrair_categoria(info),
+            "unidade": info.get("unidade_secundaria", "UN"),
+            "unidade_primaria": info.get("unidade_primaria", "UN"), "fator_conversao": fator,
+            "categoria": _extrair_categoria(info),
             "estoque_atual": estoque_atual, "consumo_diario": taxa, "movs": movs, "expurgo": expurgo,
             "forecast_mensal": _forecast_mensal(taxa),
             "previsao_30d": sim["previsao_30d"], "ponto_pedido_qtd": sim["ponto_pedido_qtd"],
             "data_pedido": sim["data_pedido"], "data_ruptura": sim["data_ruptura"],
+            "dias_atraso_pedido": sim["dias_atraso_pedido"],
+            "quantidade_comprar_secundaria": qtd_comprar_sec,
+            "quantidade_comprar_primaria": qtd_comprar_prim,
         })
     out.sort(key=lambda i: (i["data_pedido"] is None, i["data_pedido"] or datetime.date.max))
     return out
@@ -364,6 +405,8 @@ def _fmt_data(d):
 def _status_reposicao(p, hoje):
     if p["data_pedido"] is None:
         return "Sem dados suficientes", "var(--t3)"
+    if p.get("dias_atraso_pedido"):
+        return f'Atrasado há {p["dias_atraso_pedido"]}d', "var(--err)"
     dias = (p["data_pedido"] - hoje).days
     if dias <= 0:
         return "Repor agora", "var(--err)"
@@ -373,13 +416,15 @@ def _status_reposicao(p, hoje):
 
 def _kpis(produtos, base, lead_time):
     hoje = datetime.date.today()
-    repor_30d = sum(1 for p in produtos if p["data_pedido"] and (p["data_pedido"] - hoje).days <= 30)
+    atrasados = sum(1 for p in produtos if p.get("dias_atraso_pedido"))
+    repor_30d = sum(1 for p in produtos if p["data_pedido"] and not p.get("dias_atraso_pedido") and (p["data_pedido"] - hoje).days <= 30)
     cobertura = _cobertura_media(produtos)
     nivel = _nivel_servico(produtos, base, lead_time)
     cor_nivel = "var(--ok)" if (nivel or 0) >= 90 else ("var(--warn)" if nivel is not None else "var(--t3)")
     st.markdown(
-        f'<div class="kpis" style="grid-template-columns:repeat(3,1fr);margin:.7rem 0 1rem;">'
-        f'{kpi_html("Reposição necessária em 30d", repor_30d, "a partir de hoje", "var(--err)")}'
+        f'<div class="kpis" style="grid-template-columns:repeat(4,1fr);margin:.7rem 0 1rem;">'
+        f'{kpi_html("Pedidos atrasados", atrasados, "já deveriam ter saído", "var(--err)")}'
+        f'{kpi_html("Reposição necessária em 30d", repor_30d, "ainda dentro do prazo", "var(--warn)")}'
         f'{kpi_html("Cobertura média do estoque", f"{cobertura} dias" if cobertura is not None else "—", "", "var(--t2)")}'
         f'{kpi_html("Nível de serviço", f"{nivel}%" if nivel is not None else "—", f"lead time de {lead_time}d", cor_nivel)}'
         f'</div>', unsafe_allow_html=True)
@@ -399,18 +444,32 @@ def _tab_produto(produtos):
             txt += f' · {exp["expurgados"]} exp.'
         return txt
 
+    def _celula_pedido(p):
+        if p["data_pedido"] is None:
+            return "—"
+        if p["dias_atraso_pedido"]:
+            return f'{_fmt_data(p["data_pedido"])} <span style="color:var(--err);font-size:.7rem;">(atrasado {p["dias_atraso_pedido"]}d)</span>'
+        return _fmt_data(p["data_pedido"])
+
+    def _celula_comprar(p):
+        if p["quantidade_comprar_primaria"] <= 0:
+            return "—"
+        return f'{qtd_br(p["quantidade_comprar_primaria"])} {esc(p["unidade_primaria"])}'
+
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
         f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span></td>'
         f'<td>{qtd_br(round(p["estoque_atual"]))} {esc(p["unidade"])}</td>'
         f'<td>{qtd_br(round(p["previsao_30d"])) if p["previsao_30d"] is not None else "—"}</td>'
-        f'<td style="color:var(--err);font-weight:700;">{_fmt_data(p["data_pedido"])}</td>'
+        f'<td style="color:var(--err);font-weight:700;">{_celula_pedido(p)}</td>'
         f'<td>{_fmt_data(p["data_ruptura"])}</td>'
+        f'<td style="font-weight:600;">{_celula_comprar(p)}</td>'
         f'<td style="color:var(--t3);font-size:.75rem;">{_celula_base(p)}</td></tr>'
         for p in produtos_f)
     st.markdown(
         f'<table class="tbl"><thead><tr><th>Produto</th><th>Estoque atual</th>'
-        f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th><th>Base do cálculo</th></tr></thead>'
+        f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th>'
+        f'<th>Comprar agora</th><th>Base do cálculo</th></tr></thead>'
         f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -580,7 +639,10 @@ def _planilha_produto(produtos):
         "Consumo diário médio": round(p["consumo_diario"]),
         "Previsão 30 dias": round(p["previsao_30d"]) if p["previsao_30d"] is not None else None,
         "Ponto de Pedido": _fmt_data(p["data_pedido"]),
+        "Dias de atraso": p["dias_atraso_pedido"] or 0,
         "Ruptura Prevista": _fmt_data(p["data_ruptura"]),
+        "Comprar agora": p["quantidade_comprar_primaria"] if p["quantidade_comprar_primaria"] > 0 else 0,
+        "Unidade de Compra": p["unidade_primaria"],
     } for p in produtos])
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
