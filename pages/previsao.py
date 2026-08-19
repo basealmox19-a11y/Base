@@ -55,7 +55,7 @@ def tela_previsao_demanda():
         return
 
     st.markdown('<div class="pg">', unsafe_allow_html=True)
-    st.markdown('<div class="pg-title">📈 Previsão de Demanda</div>'
+    st.markdown('<div class="pg-title">📈 Previsão de Demanda (Em Desenvolvimento)</div>'
                  '<div class="pg-sub">Baseada nos meses fechados, com dias úteis reais de cada mês (sábado como dia cheio) e sazonalidade de Black Friday</div>',
                  unsafe_allow_html=True)
 
