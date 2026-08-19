@@ -1,17 +1,19 @@
 """pages/previsao.py — Previsão de demanda com sazonalidade de Black Friday
 
 Modelo (documentado aqui de propósito — é a peça mais sensível do módulo):
-  • Dias úteis/mês = 24. Cálculo: ano tem ~365,25 dias ÷ 7 = 52,18 semanas/ano ÷ 12
-    = 4,35 semanas/mês. Semana = 5 dias cheios (seg-sex) + sábado com expediente
-    reduzido (meio período, conta 0,5) + domingo fechado (0) → 5,5 dias-úteis-
-    equivalentes/semana. 4,35 × 5,5 = 23,9 → arredonda para 24.
-  • Consumo-base: total consumido no MÊS DE REFERÊNCIA (o último mês calendário
-    fechado antes de hoje — hoje é ago/26, então o mês de referência é jul/26,
-    e rola automaticamente a cada mês) dividido por 24. Resultado = "taxa de dia
-    útil pleno" (consumo esperado numa segunda-a-sexta comum).
-  • Consumo diário projetado = taxa_dia_util_pleno × peso do dia da semana
-    (seg-sex=1,0 · sáb=0,5 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam
-    o fator de Black Friday — a média-base nunca é inflada por ele).
+  • Dias úteis/mês = contagem REAL do calendário de cada mês específico (não é
+    mais um valor fixo): todos os dias do mês exceto domingo — ou seja, sábado
+    conta como dia cheio (peso 1,0), só domingo é dia fechado (peso 0). Um mês
+    de 31 dias com 4 domingos tem 27 dias úteis; agosto/26 tem 26.
+  • Consumo-base: para cada mês FECHADO do histórico, o total consumido naquele
+    mês é dividido pelos dias úteis REAIS daquele mês específico (ver acima),
+    gerando uma taxa diária própria por mês. Essas taxas mensais (já
+    normalizadas) passam pelo expurgo de outliers e depois pela média móvel
+    ponderada por recência (peso maior pros meses mais recentes) — resultado:
+    "taxa diária de referência".
+  • Consumo diário projetado = taxa_diaria_referencia × peso do dia da semana
+    (seg-sáb=1,0 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam o fator
+    de Black Friday — a média-base nunca é inflada por ele).
   • Ponto de pedido e ruptura: simulação dia a dia a partir de hoje, recalculada
     do zero a cada execução — reflete qualquer movimentação nova. Datas em
     dd/mm/aaaa.
@@ -39,7 +41,6 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 # ── Parâmetros do modelo (ajustáveis) ─────────────────────────────
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
-DIAS_UTEIS_MES = 24                        # 5 dias úteis + sábado (meio expediente) — ver cálculo no docstring
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
 DIAS_SEGURANCA_PADRAO = 5
 LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
@@ -55,7 +56,7 @@ def tela_previsao_demanda():
 
     st.markdown('<div class="pg">', unsafe_allow_html=True)
     st.markdown('<div class="pg-title">📈 Previsão de Demanda</div>'
-                 '<div class="pg-sub">Baseada no último mês fechado (24 dias úteis/mês), com sazonalidade de Black Friday</div>',
+                 '<div class="pg-sub">Baseada nos meses fechados, com dias úteis reais de cada mês (sábado como dia cheio) e sazonalidade de Black Friday</div>',
                  unsafe_allow_html=True)
 
     with st.spinner("Calculando previsão..."):
@@ -142,6 +143,14 @@ def _add_meses(ano, mes, n):
 def _fim_do_mes(ano, mes):
     return datetime.date(ano, mes, calendar.monthrange(ano, mes)[1])
 
+def _dias_uteis_mes(ano, mes):
+    """Dias úteis REAIS daquele mês específico: todos os dias exceto domingo
+    (sábado conta como dia cheio). Substitui o antigo valor fixo de 24."""
+    total_dias = calendar.monthrange(ano, mes)[1]
+    domingos = sum(1 for d in range(1, total_dias + 1)
+                   if datetime.date(ano, mes, d).weekday() == 6)
+    return total_dias - domingos
+
 def _meses_completos(movs):
     """Totais mensais de TODOS os meses fechados (exclui o mês corrente, em
     andamento), ordenados do mais antigo pro mais recente."""
@@ -178,19 +187,24 @@ def _taxa_mensal_ponderada(movs):
     """Média móvel ponderada dos meses fechados (após expurgo de outliers), com
     peso crescente por recência (peso 1 pro mais antigo mantido, até peso N pro
     mais recente) — meses recentes pesam mais que meses antigos na taxa final.
-    Retorna a taxa de dia útil pleno (÷24) e um resumo do que foi usado/expurgado."""
+
+    Cada mês é normalizado ANTES de comparar/ponderar: total do mês ÷ dias
+    úteis REAIS daquele mês específico (_dias_uteis_mes — sábado dia cheio,
+    só domingo fechado). Isso evita comparar/misturar meses com quantidades
+    diferentes de dias úteis sob um único divisor fixo.
+    Retorna a taxa diária de referência e um resumo do que foi usado/expurgado."""
     por_mes = _meses_completos(movs)
     if not por_mes:
         return 0.0, {"considerados": 0, "expurgados": 0}
-    valores = list(por_mes.values())
-    mantidos_idx = _expurgar_outliers(valores)
+    chaves = list(por_mes.keys())            # [(ano, mes), ...] cronológico
+    taxas_mensais = [por_mes[(ano, mes)] / _dias_uteis_mes(ano, mes) for (ano, mes) in chaves]
+    mantidos_idx = _expurgar_outliers(taxas_mensais)
     if not mantidos_idx:
-        return 0.0, {"considerados": 0, "expurgados": len(valores)}
+        return 0.0, {"considerados": 0, "expurgados": len(taxas_mensais)}
     pesos = list(range(1, len(mantidos_idx) + 1))  # cronológico -> mais recente = maior peso
     soma_pesos = sum(pesos)
-    media_ponderada = sum(valores[idx] * peso for idx, peso in zip(mantidos_idx, pesos)) / soma_pesos
-    taxa = media_ponderada / DIAS_UTEIS_MES
-    return taxa, {"considerados": len(mantidos_idx), "expurgados": len(valores) - len(mantidos_idx)}
+    taxa = sum(taxas_mensais[idx] * peso for idx, peso in zip(mantidos_idx, pesos)) / soma_pesos
+    return taxa, {"considerados": len(mantidos_idx), "expurgados": len(taxas_mensais) - len(mantidos_idx)}
 
 
 # ── Sazonalidade, peso do dia da semana e simulação dia a dia ────
@@ -200,8 +214,7 @@ def _mult_sazonal(dia):
 def _peso_dia_semana(dia):
     wd = dia.weekday()          # 0=seg ... 6=dom
     if wd == 6: return 0.0      # domingo — fechado
-    if wd == 5: return 0.5      # sábado — expediente reduzido
-    return 1.0                  # segunda a sexta — dia cheio
+    return 1.0                  # segunda a sábado — dia cheio
 
 def _consumo_dia(taxa_dia_util_pleno, dia):
     return taxa_dia_util_pleno * _mult_sazonal(dia) * _peso_dia_semana(dia)
