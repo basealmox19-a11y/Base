@@ -172,8 +172,11 @@ def _hist_modal(prod):
     movs=historico_produto(prod["id"],d_ini.strftime("%Y-%m-%d"),d_fim.strftime("%Y-%m-%d"))
     if not movs: st.info("Nenhuma movimentação no período."); st.markdown("</div>",unsafe_allow_html=True); return
     us_lbl=sigla_para_opcao(prod.get("unidade_secundaria","UN"))
+    # Ajustes manuais nunca entram no gráfico de consumo/movimentação: mesma regra
+    # já aplicada no dashboard e na previsão de demanda (não são entrada nem saída real).
+    movs_graf=[m for m in movs if not ("[AJUSTE]" in (m.get("observacao") or "") or m.get("tipo_entrada")=="Ajuste Manual")]
     datas=[]; entradas=[]; saidas=[]; saldo=[]; acum=0.0
-    for m in movs:
+    for m in movs_graf:
         data=m.get("criado_em","")[:10]; qtd=float(m.get("quantidade_convertida",0)); tipo=m.get("tipo","")
         if tipo=="entrada": acum+=qtd; entradas.append(qtd); saidas.append(0)
         else: acum=max(0,acum-qtd); saidas.append(qtd); entradas.append(0)
