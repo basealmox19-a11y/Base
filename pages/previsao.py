@@ -14,13 +14,27 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
   • Consumo diário projetado = taxa_diaria_referencia × peso do dia da semana
     (seg-sáb=1,0 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam o fator
     de Black Friday — a média-base nunca é inflada por ele).
-  • Ponto de pedido e ruptura: o ponto de pedido é o estoque mínimo primário
-    CADASTRADO no produto (convertido p/ unidade secundária), não mais uma
-    fórmula abstrata de taxa×(lead time+segurança) — reflete o nível físico
-    que o time já define em "Editar Produto". Produto sem mínimo cadastrado
-    cai de volta na fórmula por lead time. Simulação dia a dia a partir de
-    hoje, recalculada do zero a cada execução — reflete qualquer movimentação
-    nova. Datas em dd/mm/aaaa.
+  • Ponto de pedido: o estoque mínimo primário CADASTRADO no produto
+    (convertido p/ unidade secundária), não mais uma fórmula abstrata de
+    taxa×(lead time+segurança) — reflete o nível físico que o time já define
+    em "Editar Produto". Produto sem mínimo cadastrado cai de volta na
+    fórmula por lead time. Simulação dia a dia a partir de hoje, recalculada
+    do zero a cada execução — reflete qualquer movimentação nova. Datas em
+    dd/mm/aaaa.
+  • Quantidade a comprar: quando o insumo já está no ponto de pedido (ou
+    abaixo), o pedido do dia é dimensionado para cobrir o consumo PROJETADO
+    dos próximos 30 dias a partir de hoje (mesma base da "Previsão 30 dias"),
+    descontando o estoque atual — não mais lead time + segurança. Ou seja,
+    "quanto pedir hoje" = previsão de consumo dos próximos 30 dias − estoque
+    atual.
+  • Ruptura prevista: sempre simulada dia a dia a partir do consumo médio
+    projetado (mesma taxa/sazonalidade da previsão), de forma independente
+    do ponto de pedido e de qualquer reposição — mesmo que o item já tenha
+    cruzado o ponto de pedido, a ruptura mostra exatamente quando o estoque
+    zeraria SE a média de consumo se mantiver e nada for reposto. A janela
+    de 30 dias usada na previsão/quantidade a comprar não é mais
+    interrompida antes do prazo por causa disso: ela sempre soma os 30 dias
+    inteiros de consumo projetado, mesmo que a ruptura ocorra antes.
   • Nível de serviço: reconstrução retroativa do saldo (a partir do estoque
     atual, andando para trás pelas movimentações) para checar se cada entrada
     real ocorreu em até N dias (lead time configurado) depois do saldo
@@ -273,17 +287,21 @@ def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg, estoque_mi
             data_pedido = dia
         if data_ruptura is None and anterior > 0 and saldo <= 0:
             data_ruptura = dia
-        if data_pedido and data_ruptura:
+        # Só encerra a simulação depois de fechar a janela de 30 dias — do
+        # contrário, quando a ruptura acontece antes do dia 30, o loop parava
+        # cedo (assim que pedido+ruptura já tivessem sido achados) e a
+        # previsão de 30 dias saía TRUNCADA, subestimando o que realmente vai
+        # acontecer se a média de consumo se mantiver.
+        if i >= 30 and data_pedido and data_ruptura:
             break
 
-    # Quantidade a comprar: cobre o consumo esperado até a chegada do pedido (lead time),
-    # mais os dias de segurança, e ainda deixa o estoque acima do mínimo cadastrado na
-    # chegada — ou seja, repõe até o nível em que o PRÓXIMO ponto de pedido (mínimo) só
-    # seria cruzado de novo depois de mais um ciclo de lead time + segurança.
+    # Quantidade a comprar: quando o insumo já está no ponto de pedido (ou abaixo), o
+    # pedido feito HOJE é dimensionado para cobrir o consumo projetado dos próximos 30
+    # dias a partir de hoje (a mesma "Previsão 30 dias" acima, já calculada sem depender
+    # do ponto de pedido) — não mais lead time + segurança.
     quantidade_comprar = 0.0
     if estoque_atual <= ponto_pedido_qtd:
-        nivel_alvo = ponto_pedido_qtd + taxa_dia_util_pleno * (lead_time + dias_seg)
-        quantidade_comprar = max(0.0, nivel_alvo - estoque_atual)
+        quantidade_comprar = max(0.0, previsao_30d - estoque_atual)
 
     return {"ponto_pedido_qtd": ponto_pedido_qtd, "previsao_30d": previsao_30d,
             "data_pedido": data_pedido, "data_ruptura": data_ruptura,
