@@ -456,6 +456,29 @@ def _tab_produto(produtos):
             return "—"
         return f'{qtd_br(p["quantidade_comprar_primaria"])} {esc(p["unidade_primaria"])}'
 
+    # --- Paginação (mesmo padrão de pages/estoque.py) ---
+    OPCOES_PP = [10, 20, 40]
+    filtro_sig = f"{cat_sel}"
+    if st.session_state.get("prev_filtro_sig") != filtro_sig:
+        st.session_state["prev_filtro_sig"] = filtro_sig
+        st.session_state["prev_pagina"] = 1
+
+    cpp1, cpp2 = st.columns([1, 5])
+    with cpp1:
+        por_pagina = st.selectbox("Itens por página", OPCOES_PP, key="prev_por_pagina")
+    if st.session_state.get("prev_por_pagina_ant") != por_pagina:
+        st.session_state["prev_por_pagina_ant"] = por_pagina
+        st.session_state["prev_pagina"] = 1
+
+    total_paginas = max(1, -(-len(produtos_f) // por_pagina)) if produtos_f else 1
+    pagina = st.session_state.get("prev_pagina", 1)
+    pagina = min(max(pagina, 1), total_paginas)
+    st.session_state["prev_pagina"] = pagina
+
+    ini = (pagina - 1) * por_pagina
+    fim = ini + por_pagina
+    produtos_pag = produtos_f[ini:fim]
+
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
         f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span></td>'
@@ -465,12 +488,25 @@ def _tab_produto(produtos):
         f'<td>{_fmt_data(p["data_ruptura"])}</td>'
         f'<td style="font-weight:600;">{_celula_comprar(p)}</td>'
         f'<td style="color:var(--t3);font-size:.75rem;">{_celula_base(p)}</td></tr>'
-        for p in produtos_f)
+        for p in produtos_pag)
+    vz = '<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
     st.markdown(
         f'<table class="tbl"><thead><tr><th>Produto</th><th>Estoque atual</th>'
         f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th>'
         f'<th>Comprar agora</th><th>Base do cálculo</th></tr></thead>'
-        f'<tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+        f'<tbody>{rows or vz}</tbody></table>', unsafe_allow_html=True)
+
+    if produtos_f and total_paginas > 1:
+        cn1, cn2, cn3 = st.columns([1, 2, 1])
+        with cn1:
+            if st.button("← Anterior", disabled=(pagina <= 1), key="prev_prev", use_container_width=True):
+                st.session_state["prev_pagina"] = pagina - 1; st.rerun()
+        with cn2:
+            st.markdown(f'<div style="text-align:center;color:var(--t3);padding-top:.45rem;font-size:.82rem;">Página {pagina} de {total_paginas}</div>', unsafe_allow_html=True)
+        with cn3:
+            if st.button("Próxima →", disabled=(pagina >= total_paginas), key="prev_next", use_container_width=True):
+                st.session_state["prev_pagina"] = pagina + 1; st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     opcoes = {p["nome"]: p for p in produtos_f if p["consumo_diario"] > 0}
