@@ -8,9 +8,12 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
   • Consumo-base: para cada mês FECHADO do histórico, o total consumido naquele
     mês é dividido pelos dias úteis REAIS daquele mês específico (ver acima),
     gerando uma taxa diária própria por mês. Essas taxas mensais (já
-    normalizadas) passam pelo expurgo de outliers e depois pela média móvel
-    ponderada por recência (peso maior pros meses mais recentes) — resultado:
-    "taxa diária de referência".
+    normalizadas) passam pelo expurgo de outliers e depois por uma REGRESSÃO
+    LINEAR (mínimos quadrados) sobre a sequência de meses mantidos — a reta
+    de tendência é projetada um mês à frente do último mês fechado, dando a
+    "taxa diária de referência" (nunca abaixo de zero, mesmo que a tendência
+    aponte queda). Com um único mês mantido, não há tendência a ajustar: usa
+    o valor daquele mês direto.
   • Consumo diário projetado = taxa_diaria_referencia × peso do dia da semana
     (seg-sáb=1,0 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam o fator
     de Black Friday — a média-base nunca é inflada por ele).
@@ -94,8 +97,8 @@ def tela_previsao_demanda():
         dias_seg = st.number_input("Estoque de segurança (dias de consumo)", min_value=0,
                                     value=DIAS_SEGURANCA_PADRAO, step=1)
 
-    st.caption("Consumo-base: média móvel ponderada dos meses fechados (peso maior para os mais "
-               "recentes), com expurgo de meses atípicos antes do cálculo.")
+    st.caption("Consumo-base: tendência linear sobre os meses fechados (regressão projetada 1 mês "
+               "à frente do último mês), com expurgo de meses atípicos antes do cálculo.")
 
     produtos = _calcular_previsao_produtos(base, lead_time, dias_seg)
     resumo_setores = _calcular_resumo_setores(base)
@@ -201,12 +204,18 @@ def _expurgar_outliers(valores):
         mantidos = [i for i in idx_validos if abs(0.6745 * (valores[i] - mediana) / mad) <= 3.5]
     return mantidos if mantidos else idx_validos
 
-def _taxa_mensal_ponderada(movs):
-    """Média móvel ponderada dos meses fechados (após expurgo de outliers), com
-    peso crescente por recência (peso 1 pro mais antigo mantido, até peso N pro
-    mais recente) — meses recentes pesam mais que meses antigos na taxa final.
+def _taxa_mensal_tendencia(movs):
+    """Tendência linear (regressão por mínimos quadrados) sobre as taxas diárias
+    mensais dos meses fechados (após expurgo de outliers): ajusta uma reta
+    taxa = a + b·x sobre a sequência cronológica dos meses mantidos (x = 0, 1,
+    2, ... na ordem em que ficaram, ignorando os expurgados) e projeta essa
+    reta um passo à frente do último mês mantido — ou seja, a "taxa diária de
+    referência" é o valor que a tendência aponta para o próximo mês, não uma
+    média do passado. Com um único mês mantido não há tendência a ajustar:
+    usa o valor daquele mês direto. A reta nunca projeta abaixo de zero,
+    mesmo com tendência de queda forte.
 
-    Cada mês é normalizado ANTES de comparar/ponderar: total do mês ÷ dias
+    Cada mês é normalizado ANTES de ajustar a reta: total do mês ÷ dias
     úteis REAIS daquele mês específico (_dias_uteis_mes — sábado dia cheio,
     só domingo fechado). Isso evita comparar/misturar meses com quantidades
     diferentes de dias úteis sob um único divisor fixo.
@@ -219,11 +228,24 @@ def _taxa_mensal_ponderada(movs):
     mantidos_idx = _expurgar_outliers(taxas_mensais)
     if not mantidos_idx:
         return 0.0, {"considerados": 0, "expurgados": len(taxas_mensais)}
-    pesos = list(range(1, len(mantidos_idx) + 1))  # cronológico -> mais recente = maior peso
-    soma_pesos = sum(pesos)
-    taxa = sum(taxas_mensais[idx] * peso for idx, peso in zip(mantidos_idx, pesos)) / soma_pesos
+    valores = [taxas_mensais[i] for i in mantidos_idx]
+    n = len(valores)
+    if n == 1:
+        taxa = valores[0]
+    else:
+        xs = list(range(n))                 # posições cronológicas entre os meses mantidos
+        media_x = sum(xs) / n
+        media_y = sum(valores) / n
+        variancia_x = sum((x - media_x) ** 2 for x in xs)
+        if variancia_x == 0:
+            taxa = media_y
+        else:
+            b = sum((x - media_x) * (y - media_y) for x, y in zip(xs, valores)) / variancia_x
+            a = media_y - b * media_x
+            taxa = a + b * n                # projeta a reta 1 passo à frente do último mês mantido
+    taxa = max(taxa, 0.0)                    # tendência de queda não pode virar consumo negativo
     taxa = math.ceil(taxa - 1e-9) if taxa > 0 else taxa  # arredonda a taxa diária p/ cima quando há fração (ex.: 7,77 -> 8)
-    return taxa, {"considerados": len(mantidos_idx), "expurgados": len(taxas_mensais) - len(mantidos_idx)}
+    return taxa, {"considerados": n, "expurgados": len(taxas_mensais) - n}
 
 
 # ── Sazonalidade, peso do dia da semana e simulação dia a dia ────
@@ -339,7 +361,7 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
     out = []
     for pid, p in base["produtos"].items():
         info, movs = p["info"], p["movs"]
-        taxa, expurgo = _taxa_mensal_ponderada(movs)
+        taxa, expurgo = _taxa_mensal_tendencia(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
         fator = float(info.get("fator_conversao") or 1) or 1.0
         minimo_primario = float(info.get("estoque_minimo_primario") or 0)
@@ -369,7 +391,7 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
 def _calcular_resumo_setores(base):
     out = []
     for setor, movs in base["setores"].items():
-        taxa, _expurgo = _taxa_mensal_ponderada(movs)
+        taxa, _expurgo = _taxa_mensal_tendencia(movs)
         out.append({
             "setor": setor, "consumo_diario": taxa,
             "previsao_30d": _previsao_periodo(taxa, 30) if taxa > 0 else 0.0,
@@ -612,7 +634,7 @@ def _tab_setor(base, produtos):
         d_ini, d_fim = datas[0], datas[-1]
 
     movs_filtrados = [m for m in movs_setor if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
-    taxa_setor, _expurgo_setor = _taxa_mensal_ponderada(movs_setor)
+    taxa_setor, _expurgo_setor = _taxa_mensal_tendencia(movs_setor)
     _grafico_setor(movs_filtrados, taxa_setor)
     st.markdown("</div>", unsafe_allow_html=True)
 
