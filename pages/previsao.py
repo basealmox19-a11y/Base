@@ -42,7 +42,7 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
-DIAS_SEGURANCA_PADRAO = 5
+DIAS_SEGURANCA_PADRAO = 7
 LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
 HORIZONTE_SIMULACAO_DIAS = 400
 MESES_PROJECAO_FUTUROS = 12
