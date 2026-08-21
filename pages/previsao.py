@@ -42,7 +42,7 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
-DIAS_SEGURANCA_PADRAO = 7
+DIAS_SEGURANCA_PADRAO = 5
 LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
 HORIZONTE_SIMULACAO_DIAS = 400
 MESES_PROJECAO_FUTUROS = 12
@@ -204,6 +204,7 @@ def _taxa_mensal_ponderada(movs):
     pesos = list(range(1, len(mantidos_idx) + 1))  # cronológico -> mais recente = maior peso
     soma_pesos = sum(pesos)
     taxa = sum(taxas_mensais[idx] * peso for idx, peso in zip(mantidos_idx, pesos)) / soma_pesos
+    taxa = math.ceil(taxa - 1e-9) if taxa > 0 else taxa  # arredonda a taxa diária p/ cima quando há fração (ex.: 7,77 -> 8)
     return taxa, {"considerados": len(mantidos_idx), "expurgados": len(taxas_mensais) - len(mantidos_idx)}
 
 
