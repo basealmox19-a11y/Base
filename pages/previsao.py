@@ -14,9 +14,13 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
   • Consumo diário projetado = taxa_diaria_referencia × peso do dia da semana
     (seg-sáb=1,0 · dom=0) × fator sazonal do mês (só Out/Nov/Dez levam o fator
     de Black Friday — a média-base nunca é inflada por ele).
-  • Ponto de pedido e ruptura: simulação dia a dia a partir de hoje, recalculada
-    do zero a cada execução — reflete qualquer movimentação nova. Datas em
-    dd/mm/aaaa.
+  • Ponto de pedido e ruptura: o ponto de pedido é o estoque mínimo primário
+    CADASTRADO no produto (convertido p/ unidade secundária), não mais uma
+    fórmula abstrata de taxa×(lead time+segurança) — reflete o nível físico
+    que o time já define em "Editar Produto". Produto sem mínimo cadastrado
+    cai de volta na fórmula por lead time. Simulação dia a dia a partir de
+    hoje, recalculada do zero a cada execução — reflete qualquer movimentação
+    nova. Datas em dd/mm/aaaa.
   • Nível de serviço: reconstrução retroativa do saldo (a partir do estoque
     atual, andando para trás pelas movimentações) para checar se cada entrada
     real ocorreu em até N dias (lead time configurado) depois do saldo
@@ -224,11 +228,16 @@ def _previsao_periodo(taxa_dia_util_pleno, dias):
     hoje = datetime.date.today()
     return sum(_consumo_dia(taxa_dia_util_pleno, hoje + datetime.timedelta(days=i)) for i in range(1, dias + 1))
 
-def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg):
+def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg, estoque_minimo_secundario=0.0):
     if taxa_dia_util_pleno <= 0:
         return {"ponto_pedido_qtd": None, "previsao_30d": None, "data_pedido": None,
                 "data_ruptura": None, "dias_atraso_pedido": 0, "quantidade_comprar": None}
-    ponto_pedido_qtd = taxa_dia_util_pleno * (lead_time + dias_seg)
+    # Ponto de pedido = estoque mínimo primário CADASTRADO no produto (convertido p/ unidade
+    # secundária) — não mais uma fórmula abstrata de taxa×(lead time+segurança). Isso alinha
+    # o alerta ao nível mínimo físico que o time já define em "Editar Produto", tornando a data
+    # de pedido/atraso condizente com a realidade do estoque. Produto sem mínimo cadastrado (0)
+    # cai de volta na fórmula por lead time, pra não ficar sem ponto de pedido algum.
+    ponto_pedido_qtd = estoque_minimo_secundario if estoque_minimo_secundario > 0 else taxa_dia_util_pleno * (lead_time + dias_seg)
     hoje = datetime.date.today()
 
     # Se o estoque de HOJE já está no ponto de pedido ou abaixo dele, o pedido
@@ -267,13 +276,13 @@ def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg):
         if data_pedido and data_ruptura:
             break
 
-    # Quantidade a comprar: cobre o consumo esperado até a chegada do pedido
-    # (lead time) e ainda deixa o estoque de segurança reconstituído na chegada
-    # — ou seja, repõe até o nível em que o PRÓXIMO ponto de pedido só seria
-    # cruzado de novo depois de mais um ciclo de lead time.
+    # Quantidade a comprar: cobre o consumo esperado até a chegada do pedido (lead time),
+    # mais os dias de segurança, e ainda deixa o estoque acima do mínimo cadastrado na
+    # chegada — ou seja, repõe até o nível em que o PRÓXIMO ponto de pedido (mínimo) só
+    # seria cruzado de novo depois de mais um ciclo de lead time + segurança.
     quantidade_comprar = 0.0
     if estoque_atual <= ponto_pedido_qtd:
-        nivel_alvo = ponto_pedido_qtd + taxa_dia_util_pleno * lead_time
+        nivel_alvo = ponto_pedido_qtd + taxa_dia_util_pleno * (lead_time + dias_seg)
         quantidade_comprar = max(0.0, nivel_alvo - estoque_atual)
 
     return {"ponto_pedido_qtd": ponto_pedido_qtd, "previsao_30d": previsao_30d,
@@ -315,7 +324,9 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
         taxa, expurgo = _taxa_mensal_ponderada(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
         fator = float(info.get("fator_conversao") or 1) or 1.0
-        sim = _simular(estoque_atual, taxa, lead_time, dias_seg)
+        minimo_primario = float(info.get("estoque_minimo_primario") or 0)
+        minimo_secundario = minimo_primario * fator
+        sim = _simular(estoque_atual, taxa, lead_time, dias_seg, estoque_minimo_secundario=minimo_secundario)
         qtd_comprar_sec = sim["quantidade_comprar"] or 0.0
         # arredonda pra cima: não dá pra comprar fração da unidade primária (caixa, fardo, etc.)
         qtd_comprar_prim = math.ceil(qtd_comprar_sec / fator - 1e-9) if qtd_comprar_sec > 0 else 0
