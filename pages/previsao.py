@@ -503,12 +503,12 @@ def _cobertura_media(produtos):
 def _fmt_data(d):
     return d.strftime("%d/%m/%Y") if d else "—"
 
-def _status_reposicao(p, hoje):
-    if p["data_pedido"] is None:
+def _status_reposicao_setor(giro, hoje):
+    """Situação de ressuprimento calculada só com o histórico do setor (giro/
+    próxima reposição estimada), independente do ponto de pedido geral do item."""
+    if not giro or giro["proxima_data_estimada"] is None:
         return "Sem dados suficientes", "var(--t3)"
-    if p.get("dias_atraso_pedido"):
-        return f'Atrasado há {p["dias_atraso_pedido"]}d', "var(--err)"
-    dias = (p["data_pedido"] - hoje).days
+    dias = (giro["proxima_data_estimada"] - hoje).days
     if dias <= 0:
         return "Repor agora", "var(--err)"
     if dias <= 30:
@@ -702,11 +702,11 @@ def _tab_setor(base, produtos):
         qtd_periodo = sum(m["qtd"] for m in sp["movs"] if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim)
         if qtd_periodo <= 0:
             continue
-        status, cor = _status_reposicao(prod_geral, hoje)
         # giro/média de reposição usam TODO o histórico do item nesse setor (não só o
         # período filtrado no gráfico acima) — precisam da série completa de solicitações
         # pra medir o intervalo real entre pedidos.
         giro = _giro_estoque_item_setor(sp["movs"])
+        status, cor = _status_reposicao_setor(giro, hoje)
         ultima_data_fmt = _fmt_data(datetime.date.fromisoformat(giro["ultima_data"])) if giro else "—"
         ultima_qtd_fmt = f'{qtd_br(round(giro["ultima_qtd"]))} {esc(prod_geral["unidade"])}' if giro else "—"
         giro_fmt = qtd_br(round(giro["giro_diario"], 2)) if giro and giro["giro_diario"] is not None else "—"
@@ -722,7 +722,6 @@ def _tab_setor(base, produtos):
             f'<td>{giro_fmt}</td>'
             f'<td>{media_reposicao_fmt}</td>'
             f'<td>{proxima_fmt}</td>'
-            f'<td>{_fmt_data(prod_geral["data_pedido"])}</td>'
             f'<td><span style="color:{cor};font-weight:700;">{status}</span></td></tr>'
         )
     if linhas:
@@ -731,7 +730,7 @@ def _tab_setor(base, produtos):
             f'<th>Última qtd abastecida</th><th>Consumido no período</th>'
             f'<th>Giro (un/dia, setor)</th><th>Média de reposição (setor)</th>'
             f'<th>Próxima reposição estimada (setor)</th>'
-            f'<th>Reposição prevista em (geral)</th><th>Situação (geral)</th></tr></thead>'
+            f'<th>Situação de ressuprimento (setor)</th></tr></thead>'
             f'<tbody>{linhas}</tbody></table>',
             unsafe_allow_html=True)
     else:
