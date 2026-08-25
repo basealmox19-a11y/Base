@@ -401,7 +401,56 @@ def _calcular_resumo_setores(base):
     return out
 
 
-# ── Nível de serviço (reconstrução retroativa do saldo) ───────────
+# ── Giro de estoque por item dentro do setor (só para a aba "por setor") ──
+def _giro_estoque_item_setor(movs):
+    """Giro de estoque de um item DENTRO de um setor específico — usado só na aba de
+    previsão por setor, não mexe na previsão geral por produto.
+
+    Diferente da taxa por tendência linear (que agrega o produto inteiro por mês, no
+    almoxarifado todo), aqui o giro vem direto do ritmo real de solicitações daquele
+    item para aquele setor:
+      giro_diario = soma das quantidades solicitadas ÷ dias corridos entre a 1ª e a
+      última solicitação (não dias úteis — é o tempo corrido real entre pedidos).
+      intervalo_medio_dias = dias corridos ÷ (nº de solicitações − 1), ou seja, o
+      espaçamento médio entre uma solicitação e a próxima.
+      média_reposição = giro_diario × intervalo_medio_dias — quanto o setor tende a
+      puxar por ciclo normal de pedido, na mesma taxa do giro calculado (não é uma
+      média simples das quantidades passadas, é derivada do giro, como pedido).
+
+    Com menos de 2 solicitações no histórico não há intervalo pra calcular giro: a
+    média de reposição cai pra a própria última quantidade solicitada.
+    Retorna None se não houver nenhuma solicitação."""
+    if not movs:
+        return None
+    ordenados = sorted(movs, key=lambda m: m["data"])
+    ultima_data = ordenados[-1]["data"]
+    ultima_qtd = ordenados[-1]["qtd"]
+    n = len(ordenados)
+    if n < 2:
+        return {"ultima_data": ultima_data, "ultima_qtd": ultima_qtd, "n_solicitacoes": n,
+                "giro_diario": None, "intervalo_medio_dias": None,
+                "media_reposicao": ultima_qtd, "proxima_data_estimada": None}
+    d_ini = datetime.date.fromisoformat(ordenados[0]["data"])
+    d_fim = datetime.date.fromisoformat(ordenados[-1]["data"])
+    dias_corridos = (d_fim - d_ini).days
+    soma_qtd = sum(m["qtd"] for m in ordenados)
+    if dias_corridos <= 0:
+        # todas as solicitações no mesmo dia — não dá pra medir tempo entre pedidos
+        giro_diario = None
+        intervalo_medio = None
+        media_reposicao = soma_qtd / n
+        proxima_data = None
+    else:
+        giro_diario = soma_qtd / dias_corridos
+        intervalo_medio = dias_corridos / (n - 1)
+        media_reposicao = giro_diario * intervalo_medio
+        proxima_data = d_fim + datetime.timedelta(days=round(intervalo_medio))
+    return {"ultima_data": ultima_data, "ultima_qtd": ultima_qtd, "n_solicitacoes": n,
+            "giro_diario": giro_diario, "intervalo_medio_dias": intervalo_medio,
+            "media_reposicao": media_reposicao, "proxima_data_estimada": proxima_data}
+
+
+
 def _nivel_servico(produtos, base, lead_time):
     entradas_por_produto = base.get("entradas", {})
     total = no_prazo = 0
@@ -640,6 +689,8 @@ def _tab_setor(base, produtos):
 
     st.markdown('<div class="card" style="margin-top:1rem;">'
                  '<div class="card-h">Itens consumidos por este setor — previsão de ressuprimento</div>', unsafe_allow_html=True)
+    st.caption("Giro e média de reposição calculados só com o histórico de solicitações "
+               "DESTE setor para cada item (não usam a tendência mensal do restante da previsão).")
     produtos_by_id = {p["id"]: p for p in produtos}
     itens_setor = base["setor_produto"].get(setor_sel, {})
     hoje = datetime.date.today()
@@ -652,16 +703,36 @@ def _tab_setor(base, produtos):
         if qtd_periodo <= 0:
             continue
         status, cor = _status_reposicao(prod_geral, hoje)
+        # giro/média de reposição usam TODO o histórico do item nesse setor (não só o
+        # período filtrado no gráfico acima) — precisam da série completa de solicitações
+        # pra medir o intervalo real entre pedidos.
+        giro = _giro_estoque_item_setor(sp["movs"])
+        ultima_data_fmt = _fmt_data(datetime.date.fromisoformat(giro["ultima_data"])) if giro else "—"
+        ultima_qtd_fmt = f'{qtd_br(round(giro["ultima_qtd"]))} {esc(prod_geral["unidade"])}' if giro else "—"
+        giro_fmt = qtd_br(round(giro["giro_diario"], 2)) if giro and giro["giro_diario"] is not None else "—"
+        media_reposicao_fmt = (f'{qtd_br(round(giro["media_reposicao"]))} {esc(prod_geral["unidade"])}'
+                                if giro else "—")
+        proxima_fmt = (_fmt_data(giro["proxima_data_estimada"])
+                        if giro and giro["proxima_data_estimada"] else "—")
         linhas += (
             f'<tr><td><strong>{esc(prod_geral["nome"])}</strong></td>'
+            f'<td>{ultima_data_fmt}</td>'
+            f'<td>{ultima_qtd_fmt}</td>'
             f'<td>{qtd_br(round(qtd_periodo))} {esc(prod_geral["unidade"])}</td>'
+            f'<td>{giro_fmt}</td>'
+            f'<td>{media_reposicao_fmt}</td>'
+            f'<td>{proxima_fmt}</td>'
             f'<td>{_fmt_data(prod_geral["data_pedido"])}</td>'
             f'<td><span style="color:{cor};font-weight:700;">{status}</span></td></tr>'
         )
     if linhas:
         st.markdown(
-            f'<table class="tbl"><thead><tr><th>Item</th><th>Consumido no período</th>'
-            f'<th>Reposição prevista em</th><th>Situação</th></tr></thead><tbody>{linhas}</tbody></table>',
+            f'<table class="tbl"><thead><tr><th>Item</th><th>Última solicitação</th>'
+            f'<th>Última qtd abastecida</th><th>Consumido no período</th>'
+            f'<th>Giro (un/dia, setor)</th><th>Média de reposição (setor)</th>'
+            f'<th>Próxima reposição estimada (setor)</th>'
+            f'<th>Reposição prevista em (geral)</th><th>Situação (geral)</th></tr></thead>'
+            f'<tbody>{linhas}</tbody></table>',
             unsafe_allow_html=True)
     else:
         st.info("Nenhum item com consumo no período selecionado.")
