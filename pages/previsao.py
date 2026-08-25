@@ -107,7 +107,7 @@ def tela_previsao_demanda():
 
     tabs = st.tabs(["Por produto", "Por setor", "Exportar"])
     with tabs[0]: _tab_produto(produtos)
-    with tabs[1]: _tab_setor(base, produtos)
+    with tabs[1]: _tab_setor(base, produtos, lead_time)
     with tabs[2]: _tab_exportar(produtos, resumo_setores)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -402,52 +402,61 @@ def _calcular_resumo_setores(base):
 
 
 # ── Giro de estoque por item dentro do setor (só para a aba "por setor") ──
-def _giro_estoque_item_setor(movs):
+def _giro_estoque_item_setor(movs, lead_time_fallback=30):
     """Giro de estoque de um item DENTRO de um setor específico — usado só na aba de
     previsão por setor, não mexe na previsão geral por produto.
 
-    Diferente da taxa por tendência linear (que agrega o produto inteiro por mês, no
-    almoxarifado todo), aqui o giro vem direto do ritmo real de solicitações daquele
-    item para aquele setor:
-      giro_diario = soma das quantidades solicitadas ÷ dias corridos entre a 1ª e a
-      última solicitação (não dias úteis — é o tempo corrido real entre pedidos).
-      intervalo_medio_dias = dias corridos ÷ (nº de solicitações − 1), ou seja, o
-      espaçamento médio entre uma solicitação e a próxima.
+    TODA saída registrada pro item nesse setor conta como um evento de reposição —
+    solicitação formal ou saída manual, tanto faz a origem, o que importa é que o
+    insumo saiu pra aquele setor:
+      giro_diario = soma das quantidades saídas ÷ dias corridos entre a 1ª e a
+      última saída (não dias úteis — é o tempo corrido real entre reposições).
+      intervalo_medio_dias = dias corridos ÷ (nº de saídas − 1), ou seja, o
+      espaçamento médio entre uma reposição e a próxima.
       média_reposição = giro_diario × intervalo_medio_dias — quanto o setor tende a
-      puxar por ciclo normal de pedido, na mesma taxa do giro calculado (não é uma
-      média simples das quantidades passadas, é derivada do giro, como pedido).
+      puxar por ciclo normal, na mesma taxa do giro calculado.
 
-    Com menos de 2 solicitações no histórico não há intervalo pra calcular giro: a
-    média de reposição cai pra a própria última quantidade solicitada.
-    Retorna None se não houver nenhuma solicitação."""
+    Com só 1 saída no histórico (ou todas no mesmo dia) ainda não dá pra medir o
+    intervalo real entre reposições — nesse caso a 1ª estimativa usa
+    `lead_time_fallback` dias como calibração inicial, pra já apresentar giro e
+    previsão de próxima reposição desde a 1ª saída (marcados como "calibrando").
+    A estimativa se ajusta sozinha, com o intervalo real medido, assim que houver
+    uma 2ª saída em data diferente.
+    Retorna None se não houver nenhuma saída registrada."""
     if not movs:
         return None
     ordenados = sorted(movs, key=lambda m: m["data"])
     ultima_data = ordenados[-1]["data"]
     ultima_qtd = ordenados[-1]["qtd"]
     n = len(ordenados)
+    d_ult = datetime.date.fromisoformat(ultima_data)
     if n < 2:
+        giro_diario = ultima_qtd / lead_time_fallback if lead_time_fallback else None
+        proxima_data = d_ult + datetime.timedelta(days=lead_time_fallback) if lead_time_fallback else None
         return {"ultima_data": ultima_data, "ultima_qtd": ultima_qtd, "n_solicitacoes": n,
-                "giro_diario": None, "intervalo_medio_dias": None,
-                "media_reposicao": ultima_qtd, "proxima_data_estimada": None}
+                "giro_diario": giro_diario, "intervalo_medio_dias": lead_time_fallback,
+                "media_reposicao": ultima_qtd, "proxima_data_estimada": proxima_data,
+                "calibrando": True}
     d_ini = datetime.date.fromisoformat(ordenados[0]["data"])
-    d_fim = datetime.date.fromisoformat(ordenados[-1]["data"])
-    dias_corridos = (d_fim - d_ini).days
+    dias_corridos = (d_ult - d_ini).days
     soma_qtd = sum(m["qtd"] for m in ordenados)
     if dias_corridos <= 0:
-        # todas as solicitações no mesmo dia — não dá pra medir tempo entre pedidos
-        giro_diario = None
-        intervalo_medio = None
+        # todas as saídas no mesmo dia — mesma calibração inicial do caso de 1 só
+        giro_diario = soma_qtd / lead_time_fallback if lead_time_fallback else None
         media_reposicao = soma_qtd / n
-        proxima_data = None
-    else:
-        giro_diario = soma_qtd / dias_corridos
-        intervalo_medio = dias_corridos / (n - 1)
-        media_reposicao = giro_diario * intervalo_medio
-        proxima_data = d_fim + datetime.timedelta(days=round(intervalo_medio))
+        proxima_data = d_ult + datetime.timedelta(days=lead_time_fallback) if lead_time_fallback else None
+        return {"ultima_data": ultima_data, "ultima_qtd": ultima_qtd, "n_solicitacoes": n,
+                "giro_diario": giro_diario, "intervalo_medio_dias": lead_time_fallback,
+                "media_reposicao": media_reposicao, "proxima_data_estimada": proxima_data,
+                "calibrando": True}
+    giro_diario = soma_qtd / dias_corridos
+    intervalo_medio = dias_corridos / (n - 1)
+    media_reposicao = giro_diario * intervalo_medio
+    proxima_data = d_ult + datetime.timedelta(days=round(intervalo_medio))
     return {"ultima_data": ultima_data, "ultima_qtd": ultima_qtd, "n_solicitacoes": n,
             "giro_diario": giro_diario, "intervalo_medio_dias": intervalo_medio,
-            "media_reposicao": media_reposicao, "proxima_data_estimada": proxima_data}
+            "media_reposicao": media_reposicao, "proxima_data_estimada": proxima_data,
+            "calibrando": False}
 
 
 
@@ -510,10 +519,14 @@ def _status_reposicao_setor(giro, hoje):
         return "Sem dados suficientes", "var(--t3)"
     dias = (giro["proxima_data_estimada"] - hoje).days
     if dias <= 0:
-        return "Repor agora", "var(--err)"
-    if dias <= 30:
-        return "Repor em breve", "var(--warn)"
-    return "OK", "var(--ok)"
+        status, cor = "Repor agora", "var(--err)"
+    elif dias <= 30:
+        status, cor = "Repor em breve", "var(--warn)"
+    else:
+        status, cor = "OK", "var(--ok)"
+    if giro.get("calibrando"):
+        status += " (calibrando)"
+    return status, cor
 
 def _kpis(produtos, base, lead_time):
     hoje = datetime.date.today()
@@ -660,7 +673,7 @@ def _grafico_produto(p):
 
 
 # ── Aba Por setor — filtro individual + tabela de ressuprimento ──
-def _tab_setor(base, produtos):
+def _tab_setor(base, produtos, lead_time):
     st.markdown('<div class="card"><div class="card-h">Consumo por setor</div>', unsafe_allow_html=True)
     setores_disponiveis = sorted(base["setores"].keys())
     if not setores_disponiveis:
@@ -689,8 +702,11 @@ def _tab_setor(base, produtos):
 
     st.markdown('<div class="card" style="margin-top:1rem;">'
                  '<div class="card-h">Itens consumidos por este setor — previsão de ressuprimento</div>', unsafe_allow_html=True)
-    st.caption("Giro e média de reposição calculados só com o histórico de solicitações "
-               "DESTE setor para cada item (não usam a tendência mensal do restante da previsão).")
+    st.caption("Giro e média de reposição calculados só com o histórico de saídas "
+               "DESTE setor pra cada item — solicitação formal ou saída manual, qualquer "
+               "saída conta como reposição (não usam a tendência mensal do restante da "
+               "previsão). Com só 1 saída registrada, a estimativa usa o lead time como "
+               "calibração inicial e se ajusta sozinha a partir da 2ª saída.")
     produtos_by_id = {p["id"]: p for p in produtos}
     itens_setor = base["setor_produto"].get(setor_sel, {})
     hoje = datetime.date.today()
@@ -705,7 +721,7 @@ def _tab_setor(base, produtos):
         # giro/média de reposição usam TODO o histórico do item nesse setor (não só o
         # período filtrado no gráfico acima) — precisam da série completa de solicitações
         # pra medir o intervalo real entre pedidos.
-        giro = _giro_estoque_item_setor(sp["movs"])
+        giro = _giro_estoque_item_setor(sp["movs"], lead_time_fallback=lead_time)
         status, cor = _status_reposicao_setor(giro, hoje)
         ultima_data_fmt = _fmt_data(datetime.date.fromisoformat(giro["ultima_data"])) if giro else "—"
         ultima_qtd_fmt = f'{qtd_br(round(giro["ultima_qtd"]))} {esc(prod_geral["unidade"])}' if giro else "—"
