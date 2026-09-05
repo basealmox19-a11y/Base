@@ -18,6 +18,16 @@ def _u(label,val="UN",key=None):
 _PL=dict(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
          font=dict(family="Plus Jakarta Sans",size=11),margin=dict(l=0,r=0,t=20,b=0))
 
+def _badge_ativo(ativo):
+    """Selo visual de situação do produto (ativo/inativo)."""
+    if ativo:
+        return ('<span style="display:inline-block;padding:.1rem .5rem;border-radius:20px;'
+                'font-size:.66rem;font-weight:700;background:rgba(22,163,74,.12);'
+                'color:var(--ok);white-space:nowrap;">Ativo</span>')
+    return ('<span style="display:inline-block;padding:.1rem .5rem;border-radius:20px;'
+            'font-size:.66rem;font-weight:700;background:rgba(220,38,38,.12);'
+            'color:var(--err);white-space:nowrap;">Inativo</span>')
+
 def _planilha_estoque(prods):
     """Gera um .xlsx (bytes) com todo o inventário, independente de filtros aplicados na tela."""
     linhas=[]
@@ -66,8 +76,10 @@ def tela_estoque():
     st.markdown("</div>",unsafe_allow_html=True)
 
 def _inv():
-    prods=listar_produtos(); cats=listar_categorias()
+    prods=listar_produtos(apenas_ativos=False); cats=listar_categorias()
     if not prods: st.info("Nenhum produto."); return
+    ativos=[p for p in prods if p.get("ativo",True)]
+    inativos_n=len(prods)-len(ativos)
     ver_reserva=is_almoxarife()
     reservas={}
     if ver_reserva:
@@ -79,11 +91,11 @@ def _inv():
     with c1: busca=st.text_input("🔍 Buscar",key="eb2")
     with c2: cf=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats])
     with c3: sf=st.selectbox("Status",["Todos","OK","Baixo","Crítico"])
-    total=len(prods)
-    criticos=sum(1 for p in prods if float(p["quantidade_total_secundaria"])<=0)
-    baixos=sum(1 for p in prods if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
+    total=len(ativos)
+    criticos=sum(1 for p in ativos if float(p["quantidade_total_secundaria"])<=0)
+    baixos=sum(1 for p in ativos if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
     ok_c=total-criticos-baixos
-    st.markdown(f'<div class="kpis" style="grid-template-columns:repeat(4,1fr);margin:.7rem 0 1rem;">{kpi_html("Total",total,"","var(--t2)")}{kpi_html("OK",ok_c,"","var(--ok)")}{kpi_html("Baixo",baixos,"","var(--warn)")}{kpi_html("Crítico",criticos,"","var(--err)")}</div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="kpis" style="grid-template-columns:repeat(5,1fr);margin:.7rem 0 1rem;">{kpi_html("Total",total,"","var(--t2)")}{kpi_html("OK",ok_c,"","var(--ok)")}{kpi_html("Baixo",baixos,"","var(--warn)")}{kpi_html("Crítico",criticos,"","var(--err)")}{kpi_html("Inativos",inativos_n,"","var(--t3)")}</div>',unsafe_allow_html=True)
 
     if ver_reserva:
         dados_xlsx=_planilha_estoque(prods)
@@ -134,7 +146,8 @@ def _inv():
         cat=(p.get("categorias") or {}).get("nome","—"); up_lbl=sigla_para_opcao(p["unidade_primaria"]); us_lbl=sigla_para_opcao(p["unidade_secundaria"])
         res_qtd=reservas.get(p["id"],0.0) if ver_reserva else 0.0
         res_html=f'<br><span style="font-size:.7rem;color:var(--warn);font-weight:600;">🔒 Reservado: {qtd_br(res_qtd)} {us_lbl}</span>' if res_qtd>0 else ''
-        rows+=f'<tr><td><strong>{p["nome"]}</strong></td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span>{res_html}</td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
+        sit_html=_badge_ativo(p.get("ativo",True))
+        rows+=f'<tr><td><strong>{p["nome"]}</strong> {sit_html}</td><td class="mono">{p["codigo_interno"]}</td><td class="mono" style="color:var(--t4);">{p.get("ean") or "—"}</td><td style="color:var(--t3);">{cat}</td><td><strong>{qtd_br(est)} {us_lbl}</strong><br><span style="font-size:.71rem;color:var(--t3);">= {qtd_br(estp)} {up_lbl}</span>{res_html}</td><td style="color:var(--t3);">{qtd_br(minp)} {up_lbl}</td><td>{badge(txt,cls)}</td></tr>'
     vz='<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
     st.markdown(f'<table class="tbl"><thead><tr><th>Produto</th><th>Código</th><th>EAN</th><th>Categoria</th><th>Estoque</th><th>Mínimo</th><th>Status</th></tr></thead><tbody>{rows or vz}</tbody></table>',unsafe_allow_html=True)
 
