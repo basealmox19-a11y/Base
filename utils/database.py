@@ -313,9 +313,14 @@ def consumo_por_periodo(data_ini, data_fim, setor=None) -> list:
 # ── DASHBOARD ────────────────────────────────────────────────────
 def stats_dashboard() -> dict:
     _vazio = {"total_produtos":0,"criticos":0,"baixos":0,"ok":0,"pend_solicitacoes":0,
-              "pend_notas":0,"total_movimentacoes":0,"consumo_setor":{},"parados":0,"recentes":[],"produtos":[]}
+              "pend_notas":0,"total_movimentacoes":0,"consumo_setor":{},"parados":0,"recentes":[],
+              "produtos":[],"inativos":0,"produtos_inativos":[]}
     try:
         sb = get_sb(); prods = listar_produtos()
+        # Produtos inativos ficam de fora de listar_produtos() por padrão (apenas_ativos=True),
+        # então busca-se a lista completa só para apurar quantos/quais estão inativos.
+        todos = listar_produtos(apenas_ativos=False)
+        produtos_inativos = [p for p in todos if not p.get("ativo", True)]
         criticos=baixos=ok_c=0
         for p in prods:
             est=float(p.get("quantidade_total_secundaria") or 0)
@@ -339,7 +344,8 @@ def stats_dashboard() -> dict:
         recentes=sb.table("movimentacoes").select("criado_em,tipo,quantidade_informada,unidade_informada,status,produtos(nome)").order("criado_em",desc=True).limit(10).execute().data or []
         return {"total_produtos":len(prods),"criticos":criticos,"baixos":baixos,"ok":ok_c,
                 "pend_solicitacoes":pend_sol,"pend_notas":pend_nf,"total_movimentacoes":total_mov,
-                "consumo_setor":consumo,"parados":parados,"recentes":recentes,"produtos":prods}
+                "consumo_setor":consumo,"parados":parados,"recentes":recentes,"produtos":prods,
+                "inativos":len(produtos_inativos),"produtos_inativos":produtos_inativos}
     except Exception as e:
         _log.error("stats_dashboard: %s", e)
         return _vazio
