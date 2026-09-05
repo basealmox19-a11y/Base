@@ -31,6 +31,7 @@ def tela_dashboard():
     st.markdown(f"""
     <div class="kpis">
         {kpi_html("Produtos",       s["total_produtos"],       "ativos",            "var(--red)")}
+        {kpi_html("Inativos",       s["inativos"],             "desativados",       "var(--t3)")}
         {kpi_html("OK",             s["ok"],                   "acima do mínimo",   "var(--ok)")}
         {kpi_html("Baixo",          s["baixos"],               "abaixo do mínimo",  "var(--warn)")}
         {kpi_html("Crítico",        s["criticos"],             "sem estoque",       "var(--err)")}
@@ -70,6 +71,9 @@ def tela_dashboard():
     c3, c4 = st.columns(2)
     with c3: _recentes(s["recentes"])
     with c4: _atencao(s["produtos"])
+
+    # ── Produtos inativos ─────────────────────────────────────────
+    _inativos(s["produtos_inativos"])
 
     # ── Análise de consumo por período ───────────────────────────
     _secao_consumo_periodo()
@@ -256,6 +260,42 @@ def _atencao(produtos):
             f'</tr></thead><tbody>{rows}</tbody></table></div>'
             f'<div style="font-size:.72rem;color:var(--t3);margin-top:.4rem;">'
             f'{len(at_sorted)} produto(s) em atenção</div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _inativos(produtos_inativos):
+    st.markdown(
+        '<div class="card"><div class="card-h">🔕 Produtos Inativos</div>',
+        unsafe_allow_html=True,
+    )
+    if not produtos_inativos:
+        st.markdown(
+            '<p style="color:var(--ok);font-size:.87rem;padding:.3rem 0;">✅ Nenhum produto inativo no momento.</p>',
+            unsafe_allow_html=True,
+        )
+    else:
+        inat_sorted = sorted(produtos_inativos, key=lambda p: p["nome"])
+        rows = ""
+        for p in inat_sorted:
+            nome = p["nome"]
+            cod  = p.get("codigo_interno") or "—"
+            cat  = (p.get("categorias") or {}).get("nome", "—")
+            rows += (
+                f'<tr>'
+                f'<td>{nome[:28]}{"…" if len(nome)>28 else ""}</td>'
+                f'<td class="mono" style="color:var(--t3);">{cod}</td>'
+                f'<td style="color:var(--t3);">{cat}</td>'
+                f'</tr>'
+            )
+        st.markdown(
+            f'<div style="max-height:390px;overflow-y:auto;border-radius:5px;">'
+            f'<table class="tbl"><thead><tr>'
+            f'<th>Produto</th><th>Código</th><th>Categoria</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>'
+            f'<div style="font-size:.72rem;color:var(--t3);margin-top:.4rem;">'
+            f'{len(inat_sorted)} produto(s) inativo(s)</div>',
             unsafe_allow_html=True,
         )
     st.markdown("</div>", unsafe_allow_html=True)
