@@ -884,20 +884,14 @@ def _hist_completo():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    hcols = st.columns(_HIST_COLS)
-    for h, label in zip(hcols, ("Data", "Tipo / Produto", "Detalhe", "Setor", "Solicitante", "Status", "")):
-        h.markdown(
-            f'<span style="font-size:.72rem;font-weight:700;color:var(--t3);">{label}</span>',
-            unsafe_allow_html=True,
-        )
-    st.markdown('<div class="div"></div>', unsafe_allow_html=True)
-
+    # ── Monta linhas com os campos já derivados (usados no filtro e na exibição) ──
+    linhas = []
     for m in todas:
         origem  = m.get("origem", "almox")
-        b       = badge(m["status"].capitalize(), m["status"])
-        data    = datahora_br(m["criado_em"])
-        setor   = esc(m.get("setor_solicitante", "—"))
-        solicit = esc(m.get("nome_solicitante", "—"))
+        data_m  = (m.get("criado_em") or "")[:10]
+        setor   = m.get("setor_solicitante") or "—"
+        solicit = m.get("nome_solicitante") or "—"
+        status  = m.get("status") or "—"
 
         motivo_html = ""
         if m.get("status") == "rejeitado" and m.get("motivo_rejeicao"):
@@ -912,33 +906,108 @@ def _hist_completo():
             un_lbl     = sigla_para_opcao(m.get("unidade_informada", "UN"))
             tipo_badge = '<span style="font-size:.68rem;color:var(--t3);">🏪 Almox</span>'
             nome_prod  = prod.get("nome", "—")
-            descricao  = f'<strong>{esc(nome_prod)}</strong>'
             detalhe    = f'{qtd_br(m["quantidade_informada"])} {un_lbl}'
         else:
-            cod        = esc(m.get("codigo_requisicao") or "—")
-            sc_status  = esc(m.get("status_compra") or "—")
+            cod        = m.get("codigo_requisicao") or "—"
+            sc_status  = m.get("status_compra") or "—"
             tipo_badge = '<span style="font-size:.68rem;color:var(--info);">🛒 Compra</span>'
             nome_prod  = m.get("produto_descricao", "—")
-            descricao  = f'<strong>{esc(nome_prod)}</strong>'
             detalhe    = f'#{cod} · {sc_status}'
+
+        linhas.append({
+            "m": m, "origem": origem, "data_m": data_m,
+            "data_fmt": datahora_br(m["criado_em"]),
+            "setor": setor, "solicit": solicit, "status": status,
+            "nome_prod": nome_prod, "detalhe": detalhe,
+            "tipo_badge": tipo_badge, "motivo_html": motivo_html,
+        })
+
+    # ── Filtros por coluna ─────────────────────────────────────────────────
+    setores_opts = sorted({l["setor"] for l in linhas})
+    status_opts  = sorted({l["status"] for l in linhas})
+
+    fcols = st.columns(_HIST_COLS)
+    with fcols[0]:
+        f_data = st.date_input("Data", value=(), key="hist_f_data", label_visibility="collapsed")
+    with fcols[1]:
+        f_prod = st.text_input("Tipo / Produto", key="hist_f_prod", placeholder="🔍 Produto…", label_visibility="collapsed")
+    with fcols[2]:
+        f_det = st.text_input("Detalhe", key="hist_f_det", placeholder="🔍 Detalhe…", label_visibility="collapsed")
+    with fcols[3]:
+        f_setor = st.selectbox("Setor", ["Todos"] + setores_opts, key="hist_f_setor", label_visibility="collapsed")
+    with fcols[4]:
+        f_solic = st.text_input("Solicitante", key="hist_f_solic", placeholder="🔍 Nome…", label_visibility="collapsed")
+    with fcols[5]:
+        f_status = st.selectbox("Status", ["Todos"] + status_opts, key="hist_f_status", label_visibility="collapsed")
+    with fcols[6]:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+
+    hcols = st.columns(_HIST_COLS)
+    for h, label in zip(hcols, ("Data", "Tipo / Produto", "Detalhe", "Setor", "Solicitante", "Status", "")):
+        h.markdown(
+            f'<span style="font-size:.72rem;font-weight:700;color:var(--t3);">{label}</span>',
+            unsafe_allow_html=True,
+        )
+    st.markdown('<div class="div"></div>', unsafe_allow_html=True)
+
+    # ── Aplica os filtros ────────────────────────────────────────────────
+    def _passa(l):
+        if len(f_data) == 2:
+            if not (f_data[0].isoformat() <= l["data_m"] <= f_data[1].isoformat()):
+                return False
+        elif len(f_data) == 1:
+            if l["data_m"] != f_data[0].isoformat():
+                return False
+        if f_prod.strip() and f_prod.strip().lower() not in l["nome_prod"].lower():
+            return False
+        if f_det.strip() and f_det.strip().lower() not in l["detalhe"].lower():
+            return False
+        if f_setor != "Todos" and l["setor"] != f_setor:
+            return False
+        if f_solic.strip() and f_solic.strip().lower() not in l["solicit"].lower():
+            return False
+        if f_status != "Todos" and l["status"] != f_status:
+            return False
+        return True
+
+    filtradas = [l for l in linhas if _passa(l)]
+
+    if not filtradas:
+        st.markdown(
+            '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1.5rem 0;">'
+            'Nenhum resultado para os filtros aplicados.</p>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    st.markdown(
+        f'<div style="font-size:.72rem;color:var(--t3);margin:.2rem 0 .6rem;">'
+        f'{len(filtradas)} de {len(linhas)} registro(s)</div>',
+        unsafe_allow_html=True,
+    )
+
+    for l in filtradas:
+        m, origem = l["m"], l["origem"]
+        b = badge(l["status"].capitalize(), l["status"])
 
         c1, c2, c3, c4, c5, c6, c7 = st.columns(_HIST_COLS)
         with c1:
-            st.markdown(f'<span style="font-size:.73rem;color:var(--t3);">{data}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span style="font-size:.73rem;color:var(--t3);">{l["data_fmt"]}</span>', unsafe_allow_html=True)
         with c2:
-            st.markdown(f'{tipo_badge}<br>{descricao}', unsafe_allow_html=True)
+            st.markdown(f'{l["tipo_badge"]}<br><strong>{esc(l["nome_prod"])}</strong>', unsafe_allow_html=True)
         with c3:
-            st.markdown(f'<span style="font-size:.78rem;color:var(--t3);">{detalhe}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span style="font-size:.78rem;color:var(--t3);">{esc(l["detalhe"])}</span>', unsafe_allow_html=True)
         with c4:
-            st.markdown(f'<span style="font-size:.78rem;">{setor}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span style="font-size:.78rem;">{esc(l["setor"])}</span>', unsafe_allow_html=True)
         with c5:
-            st.markdown(f'<span style="font-size:.78rem;">{solicit}</span>', unsafe_allow_html=True)
+            st.markdown(f'<span style="font-size:.78rem;">{esc(l["solicit"])}</span>', unsafe_allow_html=True)
         with c6:
-            st.markdown(f'{b}{motivo_html}', unsafe_allow_html=True)
+            st.markdown(f'{b}{l["motivo_html"]}', unsafe_allow_html=True)
         with c7:
             if m.get("status") in ("aprovado", "rejeitado"):
                 if st.button("↩️", key=f"rev_{origem}_{m['id']}", help="Reverter para pendente"):
-                    resumo = f"{esc_trunc(nome_prod, 40)} — {m.get('nome_solicitante','—')} — {data}"
+                    resumo = f"{esc_trunc(l['nome_prod'], 40)} — {l['solicit']} — {l['data_fmt']}"
                     _dialog_reverter(m["id"], origem, resumo)
 
         st.markdown('<div class="div"></div>', unsafe_allow_html=True)
