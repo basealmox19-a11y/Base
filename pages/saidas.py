@@ -598,29 +598,99 @@ def tela_saida_aprovada():
         conc = listar_solicitacoes("concluido")
         if not conc: st.info("Nenhum.")
         else:
-            rows = ""
-            for m in conc:
-                prod = m.get("produto") or {}; un_lbl = sigla_para_opcao(m.get("unidade_informada","UN"))
-                aut = (m.get("aut") or {}).get("nick","—"); exe = (m.get("exe") or {}).get("nick","—")
-                mot = (m.get("motivo_saida") or "—")
-                mot = mot[:40] + ("…" if len(mot) > 40 else "")
-                rows += (f'<tr><td style="color:var(--t3);font-size:.73rem;">{datahora_br(m["criado_em"])}</td>'
-                         f'<td><strong>{esc(prod.get("nome","—"))}</strong></td>'
-                         f'<td>{qtd_br(m["quantidade_informada"])} {un_lbl}</td>'
-                         f'<td>{esc(m.get("setor_solicitante","—"))}</td>'
-                         f'<td>{esc(m.get("nome_solicitante","—"))}</td>'
-                         f'<td style="color:var(--ok);">{aut}</td>'
-                         f'<td style="color:var(--info);">{exe}</td>'
-                         f'<td style="color:var(--t3);font-size:.73rem;">{esc(mot)}</td></tr>')
-            st.markdown(f'<table class="tbl"><thead><tr><th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th><th>Retirante</th><th>Aprovador</th><th>Executor</th><th>Motivo (se ajustado)</th></tr></thead><tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+            busca = st.text_input("🔍 Buscar por produto, setor ou retirante", key="saprov_busca")
+            if busca.strip():
+                b = busca.lower()
+                conc = [m for m in conc if b in (m.get("produto") or {}).get("nome","").lower()
+                        or b in (m.get("setor_solicitante") or "").lower()
+                        or b in (m.get("nome_solicitante") or "").lower()]
+
+            # --- Paginação (mesmo padrão do Inventário) ---
+            OPCOES_PP = [10,20,40]
+            filtro_sig = f"{busca}"
+            if st.session_state.get("saprov_filtro_sig") != filtro_sig:
+                st.session_state["saprov_filtro_sig"] = filtro_sig
+                st.session_state["saprov_pagina"] = 1
+            cpp1,cpp2 = st.columns([1,5])
+            with cpp1: por_pagina = st.selectbox("Itens por página", OPCOES_PP, key="saprov_por_pagina")
+            if st.session_state.get("saprov_por_pagina_ant") != por_pagina:
+                st.session_state["saprov_por_pagina_ant"] = por_pagina
+                st.session_state["saprov_pagina"] = 1
+            total_paginas = max(1,-(-len(conc)//por_pagina)) if conc else 1
+            pagina = st.session_state.get("saprov_pagina",1)
+            pagina = min(max(pagina,1),total_paginas)
+            st.session_state["saprov_pagina"] = pagina
+            ini=(pagina-1)*por_pagina; fim=ini+por_pagina
+            conc_pag = conc[ini:fim]
+
+            if not conc_pag:
+                st.markdown('<div style="text-align:center;color:var(--t3);font-size:.8rem;padding:1.5rem;">Nenhum resultado</div>', unsafe_allow_html=True)
+            else:
+                rows = ""
+                for m in conc_pag:
+                    prod = m.get("produto") or {}; un_lbl = sigla_para_opcao(m.get("unidade_informada","UN"))
+                    aut = (m.get("aut") or {}).get("nick","—"); exe = (m.get("exe") or {}).get("nick","—")
+                    mot = (m.get("motivo_saida") or "—")
+                    mot = mot[:40] + ("…" if len(mot) > 40 else "")
+                    rows += (f'<tr><td style="color:var(--t3);font-size:.73rem;">{datahora_br(m["criado_em"])}</td>'
+                             f'<td><strong>{esc(prod.get("nome","—"))}</strong></td>'
+                             f'<td>{qtd_br(m["quantidade_informada"])} {un_lbl}</td>'
+                             f'<td>{esc(m.get("setor_solicitante","—"))}</td>'
+                             f'<td>{esc(m.get("nome_solicitante","—"))}</td>'
+                             f'<td style="color:var(--ok);">{aut}</td>'
+                             f'<td style="color:var(--info);">{exe}</td>'
+                             f'<td style="color:var(--t3);font-size:.73rem;">{esc(mot)}</td></tr>')
+                st.markdown(f'<table class="tbl"><thead><tr><th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th><th>Retirante</th><th>Aprovador</th><th>Executor</th><th>Motivo (se ajustado)</th></tr></thead><tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+
+                if total_paginas>1:
+                    cn1,cn2,cn3=st.columns([1,2,1])
+                    with cn1:
+                        if st.button("← Anterior",disabled=(pagina<=1),key="saprov_prev",use_container_width=True):
+                            st.session_state["saprov_pagina"]=pagina-1; st.rerun()
+                    with cn2:
+                        st.markdown(f'<div style="text-align:center;color:var(--t3);padding-top:.45rem;font-size:.72rem;">Página {pagina} de {total_paginas}</div>',unsafe_allow_html=True)
+                    with cn3:
+                        if st.button("Próxima →",disabled=(pagina>=total_paginas),key="saprov_next",use_container_width=True):
+                            st.session_state["saprov_pagina"]=pagina+1; st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def _tbl(movs):
+def _tbl(movs, namespace="tbl"):
     if not movs: st.info("Nenhum registro."); return
     st.markdown('<div class="card">', unsafe_allow_html=True)
+
+    busca = st.text_input("🔍 Buscar por produto, setor ou solicitante", key=f"{namespace}_busca")
+    if busca.strip():
+        b = busca.lower()
+        movs = [m for m in movs if b in (m.get("produto") or {}).get("nome","").lower()
+                or b in (m.get("setor_solicitante") or "").lower()
+                or b in (m.get("nome_solicitante") or "").lower()]
+
+    # --- Paginação (mesmo padrão do Inventário) ---
+    OPCOES_PP = [10,20,40]
+    filtro_sig = f"{busca}"
+    if st.session_state.get(f"{namespace}_filtro_sig") != filtro_sig:
+        st.session_state[f"{namespace}_filtro_sig"] = filtro_sig
+        st.session_state[f"{namespace}_pagina"] = 1
+    cpp1,cpp2 = st.columns([1,5])
+    with cpp1: por_pagina = st.selectbox("Itens por página", OPCOES_PP, key=f"{namespace}_por_pagina")
+    if st.session_state.get(f"{namespace}_por_pagina_ant") != por_pagina:
+        st.session_state[f"{namespace}_por_pagina_ant"] = por_pagina
+        st.session_state[f"{namespace}_pagina"] = 1
+    total_paginas = max(1,-(-len(movs)//por_pagina)) if movs else 1
+    pagina = st.session_state.get(f"{namespace}_pagina",1)
+    pagina = min(max(pagina,1),total_paginas)
+    st.session_state[f"{namespace}_pagina"] = pagina
+    ini=(pagina-1)*por_pagina; fim=ini+por_pagina
+    movs_pag = movs[ini:fim]
+
+    if not movs_pag:
+        st.markdown('<div style="text-align:center;color:var(--t3);font-size:.8rem;padding:2rem;">Nenhum resultado</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
     rows = ""
-    for m in movs:
+    for m in movs_pag:
         prod   = m.get("produto") or {}; b = badge(m["status"].capitalize(), m["status"])
         un_lbl = sigla_para_opcao(m.get("unidade_informada","UN"))
         motivo = (m.get("motivo_saida") or "—")
@@ -633,4 +703,16 @@ def _tbl(movs):
                  f'<td style="color:var(--t3);font-size:.73rem;">{esc(motivo)}</td>'
                  f'<td>{b}</td></tr>')
     st.markdown(f'<table class="tbl"><thead><tr><th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th><th>Solicitante</th><th>Motivo</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>', unsafe_allow_html=True)
+
+    if total_paginas>1:
+        cn1,cn2,cn3=st.columns([1,2,1])
+        with cn1:
+            if st.button("← Anterior",disabled=(pagina<=1),key=f"{namespace}_prev",use_container_width=True):
+                st.session_state[f"{namespace}_pagina"]=pagina-1; st.rerun()
+        with cn2:
+            st.markdown(f'<div style="text-align:center;color:var(--t3);padding-top:.45rem;font-size:.72rem;">Página {pagina} de {total_paginas}</div>',unsafe_allow_html=True)
+        with cn3:
+            if st.button("Próxima →",disabled=(pagina>=total_paginas),key=f"{namespace}_next",use_container_width=True):
+                st.session_state[f"{namespace}_pagina"]=pagina+1; st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
