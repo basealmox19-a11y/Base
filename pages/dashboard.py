@@ -1,599 +1,502 @@
-"""pages/dashboard.py — Dashboard com consumo por período e export Excel"""
-import io
-import datetime
-import plotly.graph_objects as go
+"""pages/entrada.py — Entrada com Reabastecimento, CNR obrigatório e sucesso visual"""
 import streamlit as st
-from utils.database import stats_dashboard, consumo_por_periodo, listar_setores, listar_movimentacoes, historico_saidas_previsao, mesclar_classificacoes
-from utils.ui import badge, kpi_html, status_estoque
-from utils.fmt import qtd_br, datahora_br, data_br
+from utils.database import (buscar_produto_por_ean, buscar_produtos_por_nome,
+    criar_produto, registrar_entrada_com_valor, criar_documento,
+    upload_pdf, listar_categorias, listar_movimentacoes, buscar_produto_por_id,
+    listar_produtos, atualizar_produto)
+from utils.auth import sessao
+from utils.ui import badge
+from utils.fmt import datahora_br, qtd_br, agora_iso
+from utils.unidades import SIGLAS, OPCOES, sigla_para_opcao, opcao_para_sigla
+from utils.sanitize import esc, esc_trunc
 
-_PL = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Plus Jakarta Sans", size=11),
-    margin=dict(l=0, r=0, t=20, b=0),
-    showlegend=True,
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-)
+TIPOS = ["Nota Fiscal","FL","Entrada Interna","Ajuste Manual"]
 
-# Rótulos de status do sistema: apenas 3 existem — "OK", "Estoque Baixo" e "Estoque Zerado".
-# status_estoque() (utils/ui) ainda retorna os nomes antigos ("Baixo"/"Crítico") por baixo dos panos;
-# aqui traduzimos para exibição, sem tocar na classe css (cls) que ele também retorna.
-_ROTULOS_STATUS = {"Baixo": "Estoque Baixo", "Crítico": "Estoque Zerado"}
-def _rotulo_status(txt):
-    return _ROTULOS_STATUS.get(txt, txt)
+def _u(label, val="UN", key=None):
+    idx = SIGLAS.index(val) if val in SIGLAS else 0
+    kw = {"key": key} if key else {}
+    return opcao_para_sigla(st.selectbox(label, OPCOES, index=idx, **kw))
 
+def _moeda(v):
+    v=float(v or 0)
+    s=f"{v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+    return f"R$ {s}"
 
-def tela_dashboard():
+def tela_entrada():
     st.markdown('<div class="pg">', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="pg-title">Dashboard</div>'
-        '<div class="pg-sub">Visão geral em tempo real</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="pg-title">📥 Entrada de Produtos</div>'
+                '<div class="pg-sub">Registre entradas, reabastecimentos ou cadastre novos produtos</div>',
+                unsafe_allow_html=True)
+    t1, t2, t3 = st.tabs(["Nova Entrada","♻️ Reabastecimento de Estoque","Histórico"])
+    with t1: _nova_entrada()
+    with t2: _reabastecimento()
+    with t3: _hist()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    s = stats_dashboard()
 
-    # ── KPIs ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# NOVA ENTRADA (busca por EAN/nome + cadastro de produto)
+# ══════════════════════════════════════════════════════════════════
+
+def _nova_entrada():
+    u    = sessao()
+    cats = listar_categorias()
+    cm   = {c["nome"]: c["id"] for c in cats}
+    prod = st.session_state.get("ps")
+
+    # Tela de sucesso
+    if st.session_state.get("entrada_ok"):
+        st.success("✅ Entrada Registrada com Sucesso.")
+        if st.button("➕ Nova Entrada", type="primary", key="btn_nova_ent"):
+            del st.session_state["entrada_ok"]
+            st.session_state.pop("ps", None)
+            st.session_state.pop("en", None)
+            st.rerun()
+        return
+
+    # Busca
+    st.markdown('<div class="card"><div class="card-h">🔍 Identificar Produto</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([3,1,1])
+    with c1: termo = st.text_input("Codigo do produto ou nome", placeholder="Bipe ou digite", key="eb")
+    with c2:
+        st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
+        be = st.button("Buscar EAN ou código", use_container_width=True)
+    with c3:
+        st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
+        bn = st.button("Buscar Nome", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if be and termo.strip():
+        p = buscar_produto_por_ean(termo.strip())
+        if p:
+            st.session_state["ps"] = p; st.session_state.pop("en", None); prod = p
+            st.success(f"✅ {p['nome']} — {p['codigo_interno']}")
+        else:
+            st.warning("Código não encontrado. Cadastre o produto abaixo.")
+            st.session_state.pop("ps", None); st.session_state["en"] = termo.strip()
+
+    if bn and termo.strip():
+        res = buscar_produtos_por_nome(termo.strip())
+        if res:
+            opts = {f"{r['nome']} ({r['codigo_interno']})": r for r in res}
+            sel  = st.selectbox("Selecione", list(opts.keys()), key="snr")
+            if st.button("Usar este produto →"):
+                st.session_state["ps"] = opts[sel]; st.session_state.pop("en", None); st.rerun()
+        else:
+            st.warning("Não encontrado.")
+            st.session_state.pop("ps", None)
+
+    # Produto encontrado — formulário de entrada
+    if prod:
+        _form_entrada(prod, u, cm)
+        return
+
+    # Cadastrar Produto (com EAN opcional)
+    with st.expander("➕ Cadastrar Produto"):
+        with st.form("fnp"):
+            st.markdown('<div style="font-size:.78rem;color:var(--t3);margin-bottom:.5rem;">'
+                        'O EAN é opcional mas facilita buscas futuras.</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                nm    = st.text_input("Nome do produto *")
+                cat   = st.selectbox("Categoria", list(cm.keys()))
+                up_n  = _u("Unidade primária (Como você está recebendo? Em caixa? Paletizado?...)", val="CX", key="upn")
+                us_n  = _u("Unidade secundária (Como as áreas vão consumir? Unidades? A caixa completa?)", val="UN", key="usn")
+            with c2:
+                fat_n = st.number_input("Fator de Conversão (1 primária = ? secundárias  / Aponte de acordo com o consumo do produto pelas áreas)", value=1.0, min_value=0.001, step=1.0)
+                em_n  = st.number_input("Estoque mínimo (Aponte de acordo com o controle do almoxarifado)", value=0.0, min_value=0.0)
+                ean_n = st.text_input("EAN ou Código SFC (Opcional)",
+                                       value=st.session_state.get("en",""),
+                                       placeholder="Deixe em branco se não tiver")
+            desc_n = st.text_area("Descrição (opcional)", height=60)
+            if st.form_submit_button("Cadastrar Produto →", type="primary", use_container_width=True):
+                if not nm.strip():
+                    st.error("Nome obrigatório.")
+                else:
+                    d = {"nome": nm.strip(), "categoria_id": cm.get(cat),
+                         "unidade_primaria": up_n, "unidade_secundaria": us_n,
+                         "fator_conversao": fat_n, "estoque_minimo_primario": em_n,
+                         "descricao": desc_n.strip() or None}
+                    if ean_n.strip(): d["ean"] = ean_n.strip()
+                    novo = criar_produto(d)
+                    st.session_state["ps"] = novo
+                    st.session_state.pop("en", None)
+                    st.success(f"✅ Produto **{novo['nome']}** cadastrado — {novo['codigo_interno']}")
+                    st.rerun()
+
+
+def _form_entrada(prod, u, cm):
+    """Formulário de registro de entrada para produto já localizado."""
+    est    = float(prod.get("quantidade_total_secundaria", 0))
+    fat    = float(prod.get("fator_conversao", 1))
+    up     = prod.get("unidade_primaria", "UN")
+    us     = prod.get("unidade_secundaria", "UN")
+    up_lbl = sigla_para_opcao(up)
+    us_lbl = sigla_para_opcao(us)
+
     st.markdown(f"""
-    <div class="kpis">
-        {kpi_html("Produtos",       s["total_produtos"],       "ativos",            "var(--red)")}
-        {kpi_html("OK",             s["ok"],                   "acima do mínimo",   "var(--ok)")}
-        {kpi_html("Estoque Baixo",  s["baixos"],               "abaixo do mínimo",  "var(--warn)")}
-        {kpi_html("Estoque Zerado", s["criticos"],             "sem estoque",       "var(--err)")}
-        {kpi_html("Solicitações",   s["pend_solicitacoes"],    "pendentes",         "#7C3AED")}
-        {kpi_html("Notas NF",       s["pend_notas"],           "aguardando envio",  "var(--info)")}
-        {kpi_html("Parados 30d",    s["parados"],              "sem movimentação",  "var(--t3)")}
-        {kpi_html("Movimentações",  s["total_movimentacoes"],  "total",             "var(--t2)")}
+    <div style="background:var(--ok-bg);border:1px solid rgba(22,163,74,.25);
+                border-radius:8px;padding:.8rem 1.1rem;margin:.5rem 0;font-size:.84rem;">
+        ✅ <strong>{prod['nome']}</strong>
+        &nbsp;<span class="mono" style="color:var(--t3);">{prod['codigo_interno']}</span>
+        {" &nbsp;|&nbsp; EAN: "+prod['ean'] if prod.get("ean") else ""}
+        &nbsp;|&nbsp; Estoque: <strong style="color:var(--ok);">{qtd_br(est)} {us_lbl}</strong>
+        <span style="color:var(--t3);font-size:.75rem;"> (= {qtd_br(est/fat if fat else 0)} {up_lbl})</span>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Alertas ───────────────────────────────────────────────────
-    if s["criticos"] or s["baixos"]:
-        total_atencao = s["criticos"] + s["baixos"]
-        partes = []
-        if s["criticos"]: partes.append(f"<strong>{s['criticos']} zerado(s)</strong>")
-        if s["baixos"]:   partes.append(f"<strong>{s['baixos']} abaixo do mínimo</strong>")
-        st.markdown(
-            f'<div style="background:rgba(220,38,38,.1);border:1.5px solid var(--err);border-radius:8px;'
-            f'padding:.85rem 1.1rem;margin:.5rem 0 1rem;display:flex;align-items:center;gap:.75rem;">'
-            f'<span style="font-size:1.4rem;">⚠️</span>'
-            f'<div><div style="font-weight:700;color:var(--err);font-size:.92rem;">'
-            f'{total_atencao} produto(s) precisam de atenção</div>'
-            f'<div style="font-size:.8rem;color:var(--t3);margin-top:.15rem;">{" · ".join(partes)}'
-            f' — verifique a lista abaixo.</div></div></div>',
-            unsafe_allow_html=True,
-        )
-    if s["pend_solicitacoes"]:
-        st.warning(f"🟡 **{s['pend_solicitacoes']} solicitação(ões)** aguardando aprovação.")
-    if s["pend_notas"]:
-        st.info(f"🔵 **{s['pend_notas']} nota(s)** pendentes de envio ao financeiro.")
+    st.markdown('<div class="card"><div class="card-h">📥 Registrar Entrada</div>', unsafe_allow_html=True)
 
-    # ── Insumos Essenciais (prioridade) ─────────────────────────────
-    mesclar_classificacoes(s["produtos"])
-    _saude_essenciais(s["produtos"])
-    _reposicao_essenciais(s["produtos"])
+    # Tipo de entrada fora do form para condicionar campos obrigatórios
+    te = st.selectbox("Tipo de entrada *", TIPOS, key="te_nova")
 
-    # ── Gráficos gerais ───────────────────────────────────────────
-    c1, c2 = st.columns([1.4, 1])
-    with c1: _consumo_geral(s["consumo_setor"])
-    with c2: _pie(s)
+    with st.form("fer"):
+        c1, c2 = st.columns(2)
+        with c1:
+            qtd = st.number_input("Quantidade (Informe o volume que você está recebendo, ex.: Caixa, Pacote...)", min_value=0.001, value=1.0, step=1.0)
+            ui  = _u("Unidade informada", val=up, key="ui_ent")
+            vu  = st.number_input("Valor Unitário (R$) — opcional", min_value=0.0,
+                                   value=float(prod.get("valor_unitario") or 0.0), step=0.01, format="%.2f",
+                                   help="Valor pago por unidade informada nesta compra. Deixe 0 se não quiser informar.",
+                                   key="vu_ent")
+        with c2:
+            # NF: campos obrigatórios
+            nfn  = st.text_input("Número NF" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: 001234")
+            cnr  = st.text_input("Número CNR / Pedido" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: CNR-2025-001",
+                                  help="Preenchido automaticamente no e-mail da NF")
+            forn = st.text_input("Fornecedor" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: Distribuidora ABC Ltda")
+            obs  = st.text_area("Observação", height=50)
 
-    c3, c4 = st.columns(2)
-    with c3: _recentes(s["recentes"])
-    with c4: _atencao(s["produtos"])
+        qc     = qtd * fat
+        ui_lbl = sigla_para_opcao(ui)
 
-    # ── Análise de consumo por período ───────────────────────────
-    _secao_consumo_periodo()
+        aviso_unidade = ""
+        if ui != up:
+            aviso_unidade = f"""
+            <div style="background:var(--warn-bg);border:1px solid rgba(217,119,6,.3);
+                        border-radius:7px;padding:.55rem .9rem;margin:.4rem 0;font-size:.78rem;
+                        color:var(--warn);">
+                ⚠️ Unidade informada (<strong>{ui_lbl}</strong>) é diferente da cadastrada
+                (<strong>{up_lbl}</strong>). Ao confirmar, o cadastro do produto será
+                atualizado para <strong>{ui_lbl}</strong>.
+            </div>
+            """
+
+        st.markdown(f"""
+        <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
+                    padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">
+            📦 <strong>{qtd_br(qtd)} {ui_lbl}</strong>
+            <span style="color:var(--t3);"> = </span>
+            <strong style="color:var(--red);">{qtd_br(qc)} {us_lbl}</strong>
+            <span style="color:var(--t3);"> serão adicionados ao estoque</span>
+            {f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; total estimado: <strong>{_moeda(qtd*vu)}</strong></span>' if vu>0 else ''}
+        </div>
+        {aviso_unidade}
+        """, unsafe_allow_html=True)
+
+        # PDF upload removido — envio por e-mail é feito via Outlook
+
+        if st.form_submit_button("✅ Confirmar Entrada", type="primary", use_container_width=True):
+            erros = []
+            if te == "Nota Fiscal":
+                if not nfn.strip():  erros.append("Número da NF obrigatório para Nota Fiscal.")
+                if not forn.strip(): erros.append("Fornecedor obrigatório para Nota Fiscal.")
+                if not cnr.strip():  erros.append("Número do Pedido/CNR obrigatório para Nota Fiscal.")
+            if erros:
+                for e in erros: st.error(e)
+            else:
+                # Inclui CNR na observação
+                obs_final = obs.strip()
+                if cnr.strip():
+                    obs_final = f"CNR: {cnr.strip()}" + (f" | {obs_final}" if obs_final else "")
+
+                # NF sem PDF — registra mas não cria pendência de upload
+                registrar_entrada_com_valor({
+                    "produto_id":            prod["id"],
+                    "tipo":                  "entrada",
+                    "tipo_entrada":          te,
+                    "status":                "concluido",
+                    "quantidade_informada":  qtd,
+                    "unidade_informada":     ui,
+                    "quantidade_convertida": qc,
+                    "envio_financeiro":      True,  # não cria pendência de envio
+                    "fornecedor":            forn.strip() or None,
+                    "numero_nf":             nfn.strip() or None,
+                    "observacao":            obs_final or None,
+                    "usuario_executor":      u["id"],
+                    "data_movimentacao":     agora_iso(),
+                    "valor_unitario":        vu if vu > 0 else None,
+                })
+
+                # Se a unidade informada na entrada for diferente da cadastrada no
+                # produto, atualiza o cadastro para manter o saldo/unidade consistentes
+                if ui != up:
+                    atualizar_produto(prod["id"], {"unidade_primaria": ui})
+
+                st.session_state["entrada_ok"] = True
+
+                p_novo = buscar_produto_por_id(prod["id"])
+                if p_novo: st.session_state["ps"] = p_novo
+                st.rerun()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🔄 Buscar outro produto", use_container_width=True):
+            for k in ["ps","en"]: st.session_state.pop(k, None)
+            st.rerun()
+    with col_b:
+        if st.button("➕ Nova entrada deste produto", use_container_width=True):
+            p_novo = buscar_produto_por_id(prod["id"])
+            if p_novo: st.session_state["ps"] = p_novo
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ── Saúde do estoque — insumos essenciais ───────────────────────
+# ══════════════════════════════════════════════════════════════════
+# REABASTECIMENTO DE ESTOQUE
+# ══════════════════════════════════════════════════════════════════
 
-def _saude_essenciais(produtos):
-    essenciais = [p for p in produtos if p.get("essencial")]
-    st.markdown(
-        '<div class="card"><div class="card-h">⭐ Saúde do Estoque — Insumos Estratégicos</div>',
-        unsafe_allow_html=True,
-    )
-    if not essenciais:
-        st.markdown(
-            '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1rem">'
-            'Nenhum insumo classificado como estratégico ainda. Classifique em '
-            '<strong>Estoque → Inventário</strong>.</p>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+def _reabastecimento():
+    u     = sessao()
+    cats  = listar_categorias()
+    cm    = {c["nome"]: c["id"] for c in cats}
+    prods = listar_produtos()
+
+    if not prods:
+        st.info("Nenhum produto cadastrado.")
         return
 
-    nomes, percentuais, cores, hover_txt = [], [], [], []
-    for p in essenciais:
-        est  = float(p.get("quantidade_total_secundaria") or 0)
-        minp = float(p.get("estoque_minimo_primario") or 0)
-        fat  = float(p.get("fator_conversao") or 1)
-        min_sec = minp * fat
-        # saúde = estoque atual em relação a 2x o mínimo (folga de segurança), capado em 100%
-        alvo = min_sec * 2 if min_sec > 0 else max(est, 1)
-        pct = min(100.0, (est / alvo * 100) if alvo > 0 else 100.0)
-        nome = p["nome"]
-        nomes.append(nome[:22] + ("…" if len(nome) > 22 else ""))
-        percentuais.append(round(pct, 1))
-        if est <= 0:        cores.append("#DC2626")
-        elif est <= min_sec: cores.append("#D97706")
-        else:                cores.append("#16A34A")
-        hover_txt.append(f"{qtd_br(est)} / mín {qtd_br(min_sec)} {p.get('unidade_secundaria','')}")
+    # Tela de sucesso
+    if st.session_state.get("reab_ok"):
+        info = st.session_state["reab_ok"]
+        st.markdown(f"""
+        <div style="background:var(--ok-bg);border:2px solid rgba(22,163,74,.3);
+                    border-radius:12px;padding:2rem;text-align:center;margin:1rem 0;">
+            <div style="font-size:2rem;margin-bottom:.5rem;">📦</div>
+            <div style="font-size:1.2rem;font-weight:700;color:var(--ok);margin-bottom:.5rem;">
+                Estoque Reabastecido!
+            </div>
+            <div style="font-size:.85rem;color:var(--t2);">
+                <strong>+{qtd_br(info['qc'])} {info['us_lbl']}</strong>
+                adicionados a <strong>{info['nome']}</strong><br>
+                <span style="color:var(--t3);font-size:.78rem;">
+                    {info['data']} &nbsp;|&nbsp; por: <strong>{info['nick']}</strong>
+                </span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("♻️ Novo Reabastecimento", type="primary", key="btn_novo_reab"):
+            del st.session_state["reab_ok"]
+            st.session_state.pop("reab_prod_sel", None)
+            st.rerun()
+        return
 
-    fig = go.Figure(go.Bar(
-        x=nomes, y=percentuais,
-        marker=dict(color=cores, line=dict(width=0)),
-        text=[f"{v:.0f}%" for v in percentuais], textposition="outside",
-        customdata=hover_txt,
-        hovertemplate="<b>%{x}</b><br>Saúde: %{y:.0f}%<br>%{customdata}<extra></extra>",
-    ))
-    fig.update_layout(
-        **{**_PL, "showlegend": False}, height=260,
-        xaxis=dict(gridcolor="rgba(0,0,0,.05)", tickfont=dict(size=10),
-                   tickangle=-30 if len(nomes) > 6 else 0),
-        yaxis=dict(gridcolor="rgba(0,0,0,.05)", range=[0, 115], ticksuffix="%"),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.markdown(
-        '<div style="font-size:.72rem;color:var(--t3);margin-top:.3rem;">'
-        '🟢 OK &nbsp;·&nbsp; 🟠 Estoque Baixo &nbsp;·&nbsp; 🔴 Estoque Zerado</div>',
-        unsafe_allow_html=True,
-    )
+    pm = {f"{p['nome']} ({p['codigo_interno']})": p for p in prods}
+
+    st.markdown('<div class="card"><div class="card-h">♻️ Reabastecimento de Estoque</div>',
+                unsafe_allow_html=True)
+    st.info("Selecione um produto já cadastrado e registre a nova entrada de estoque.")
+
+    # Produto selecionado — fora do form para saldo em tempo real
+    prod_sel = st.selectbox("Produto *", list(pm.keys()), key="reab_prod_sel")
+    prod     = pm[prod_sel]
+    est      = float(prod.get("quantidade_total_secundaria", 0))
+    fat      = float(prod.get("fator_conversao", 1))
+    up       = prod.get("unidade_primaria", "UN")
+    us       = prod.get("unidade_secundaria", "UN")
+    up_lbl   = sigla_para_opcao(up)
+    us_lbl   = sigla_para_opcao(us)
+
+    st.markdown(f"""
+    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
+                padding:.7rem 1rem;margin:.4rem 0;font-size:.83rem;">
+        📦 Estoque atual:
+        <strong style="color:var(--ok);">{qtd_br(est)} {us_lbl}</strong>
+        <span style="color:var(--t3);"> (= {qtd_br(est/fat if fat else 0)} {up_lbl})</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Tipo fora do form para condicionar obrigatoriedade NF
+    te = st.selectbox("Tipo de entrada *", TIPOS, key="te_reab")
+
+    with st.form("freab"):
+        c1, c2 = st.columns(2)
+        with c1:
+            qtd = st.number_input("Quantidade (Informe o volume que você está recebendo, ex.: Caixa, Pacote...)", min_value=0.001, value=1.0, step=1.0)
+            ui  = _u("Unidade informada", val=up, key="ui_reab")
+            vu  = st.number_input("Valor Unitário (R$) — opcional", min_value=0.0,
+                                   value=float(prod.get("valor_unitario") or 0.0), step=0.01, format="%.2f",
+                                   help="Valor pago por unidade informada nesta compra. Deixe 0 se não quiser informar.",
+                                   key="vu_reab")
+        with c2:
+            nfn  = st.text_input("Número NF" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: 001234")
+            cnr  = st.text_input("Número CNR / Pedido" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: CNR-2025-001")
+            forn = st.text_input("Fornecedor" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                                  placeholder="Ex: Distribuidora ABC Ltda")
+            obs  = st.text_area("Observação", height=50)
+
+        qc     = qtd * fat
+        ui_lbl = sigla_para_opcao(ui)
+
+        aviso_unidade = ""
+        if ui != up:
+            aviso_unidade = f"""
+            <div style="background:var(--warn-bg);border:1px solid rgba(217,119,6,.3);
+                        border-radius:7px;padding:.55rem .9rem;margin:.4rem 0;font-size:.78rem;
+                        color:var(--warn);">
+                ⚠️ Unidade informada (<strong>{ui_lbl}</strong>) é diferente da cadastrada
+                (<strong>{up_lbl}</strong>). Ao confirmar, o cadastro do produto será
+                atualizado para <strong>{ui_lbl}</strong>.
+            </div>
+            """
+
+        st.markdown(f"""
+        <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
+                    padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">
+            ➕ <strong>{qtd_br(qtd)} {ui_lbl}</strong>
+            <span style="color:var(--t3);"> = +</span>
+            <strong style="color:var(--ok);">{qtd_br(qc)} {us_lbl}</strong>
+            &nbsp;→&nbsp; Novo saldo:
+            <strong style="color:var(--red);">{qtd_br(est+qc)} {us_lbl}</strong>
+            {f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; total estimado: <strong>{_moeda(qtd*vu)}</strong></span>' if vu>0 else ''}
+        </div>
+        {aviso_unidade}
+        """, unsafe_allow_html=True)
+
+        # PDF upload removido
+
+        if st.form_submit_button("✅ Confirmar Reabastecimento", type="primary", use_container_width=True):
+            erros = []
+            if te == "Nota Fiscal":
+                if not nfn.strip():  erros.append("Número da NF obrigatório.")
+                if not forn.strip(): erros.append("Fornecedor obrigatório.")
+                if not cnr.strip():  erros.append("Número do Pedido/CNR obrigatório.")
+            if erros:
+                for e in erros: st.error(e)
+            else:
+                obs_final = obs.strip()
+                if cnr.strip():
+                    obs_final = f"CNR: {cnr.strip()}" + (f" | {obs_final}" if obs_final else "")
+
+                from utils.fmt import agora_brt
+                agora = agora_brt()
+
+                registrar_entrada_com_valor({
+                    "produto_id":            prod["id"],
+                    "tipo":                  "entrada",
+                    "tipo_entrada":          te,
+                    "status":                "concluido",
+                    "quantidade_informada":  qtd,
+                    "unidade_informada":     ui,
+                    "quantidade_convertida": qc,
+                    "envio_financeiro":      True,
+                    "fornecedor":            forn.strip() or None,
+                    "numero_nf":             nfn.strip() or None,
+                    "observacao":            obs_final or None,
+                    "usuario_executor":      u["id"],
+                    "data_movimentacao":     agora.isoformat(),
+                    "valor_unitario":        vu if vu > 0 else None,
+                })
+
+                # Atualiza a unidade primária cadastrada caso tenha sido alterada
+                if ui != up:
+                    atualizar_produto(prod["id"], {"unidade_primaria": ui})
+
+                st.session_state["reab_ok"] = {
+                    "nome":   prod["nome"],
+                    "qc":     qc,
+                    "us_lbl": us_lbl,
+                    "nick":   u.get("nick",""),
+                    "data":   agora.strftime("%d/%m/%Y %H:%M"),
+                }
+                st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ── Previsão de reposição — insumos essenciais ──────────────────
+# ══════════════════════════════════════════════════════════════════
+# HISTÓRICO
+# ══════════════════════════════════════════════════════════════════
 
-def _reposicao_essenciais(produtos):
-    essenciais = [p for p in produtos if p.get("essencial")]
-    st.markdown(
-        '<div class="card"><div class="card-h">📅 Previsão de Reposição — Insumos Estratégicos</div>',
-        unsafe_allow_html=True,
-    )
-    if not essenciais:
-        st.markdown(
-            '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1rem">'
-            'Nenhum insumo estratégico classificado.</p>',
-            unsafe_allow_html=True,
-        )
+def _hist():
+    movs = listar_movimentacoes(tipo="entrada", limite=100)
+    if not movs:
+        st.info("Nenhuma entrada registrada.")
+        return
+    st.markdown('<div class="card"><div class="card-h">Histórico de Entradas</div>',
+                unsafe_allow_html=True)
+
+    busca = st.text_input("🔍 Buscar por produto, código ou fornecedor", key="hent_busca")
+    if busca.strip():
+        b = busca.lower()
+        movs = [m for m in movs if b in (m.get("produto") or {}).get("nome","").lower()
+                or b in (m.get("produto") or {}).get("codigo_interno","").lower()
+                or b in (m.get("fornecedor") or "").lower()]
+
+    # --- Paginação (mesmo padrão do Inventário) ---
+    OPCOES_PP = [10,20,40]
+    filtro_sig = f"{busca}"
+    if st.session_state.get("hent_filtro_sig") != filtro_sig:
+        st.session_state["hent_filtro_sig"] = filtro_sig
+        st.session_state["hent_pagina"] = 1
+    cpp1,cpp2 = st.columns([1,5])
+    with cpp1: por_pagina = st.selectbox("Itens por página", OPCOES_PP, key="hent_por_pagina")
+    if st.session_state.get("hent_por_pagina_ant") != por_pagina:
+        st.session_state["hent_por_pagina_ant"] = por_pagina
+        st.session_state["hent_pagina"] = 1
+    total_paginas = max(1,-(-len(movs)//por_pagina)) if movs else 1
+    pagina = st.session_state.get("hent_pagina",1)
+    pagina = min(max(pagina,1),total_paginas)
+    st.session_state["hent_pagina"] = pagina
+    ini=(pagina-1)*por_pagina; fim=ini+por_pagina
+    movs_pag = movs[ini:fim]
+
+    if not movs_pag:
+        st.markdown('<div style="text-align:center;color:var(--t3);font-size:.8rem;padding:2rem;">Nenhum resultado</div>', unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         return
-
-    dias_janela = 90
-    hist = historico_saidas_previsao(dias=dias_janela)
-    consumo_por_produto = {}
-    for m in hist:
-        pid = m.get("produto_id")
-        if not pid: continue
-        consumo_por_produto[pid] = consumo_por_produto.get(pid, 0.0) + float(m.get("quantidade_convertida") or 0)
-
-    hoje = datetime.date.today()
-    linhas = []
-    for p in essenciais:
-        est  = float(p.get("quantidade_total_secundaria") or 0)
-        minp = float(p.get("estoque_minimo_primario") or 0)
-        fat  = float(p.get("fator_conversao") or 1)
-        min_sec = minp * fat
-        un = p.get("unidade_secundaria", "UN")
-        consumo_total  = consumo_por_produto.get(p["id"], 0.0)
-        consumo_diario = consumo_total / dias_janela if dias_janela else 0.0
-        if consumo_diario > 0:
-            dias_restantes = (est - min_sec) / consumo_diario
-            data_prevista  = hoje + datetime.timedelta(days=max(0, round(dias_restantes)))
-            linhas.append({"nome": p["nome"], "est": est, "un": un, "consumo_dia": consumo_diario,
-                            "dias": dias_restantes, "data": data_prevista,
-                            "urgente": dias_restantes <= 0, "sem_dados": False})
-        else:
-            linhas.append({"nome": p["nome"], "est": est, "un": un, "consumo_dia": 0.0,
-                            "dias": None, "data": None, "urgente": False, "sem_dados": True})
-
-    def _chave(l):
-        if l["sem_dados"]: return (2, 0)
-        if l["urgente"]:   return (0, l["dias"])
-        return (1, l["dias"])
-    linhas.sort(key=_chave)
 
     rows = ""
-    for l in linhas:
-        if l["sem_dados"]:
-            situacao = '<span style="color:var(--t3);">Sem consumo recente</span>'
-            data_txt = "—"
-        elif l["urgente"]:
-            situacao = '<span style="color:var(--err);font-weight:700;">🔴 Repor agora</span>'
-            data_txt = data_br(l["data"])
-        else:
-            situacao = f'<span style="color:var(--t3);">em {round(l["dias"])} dia(s)</span>'
-            data_txt = data_br(l["data"])
-        rows += (
-            f'<tr>'
-            f'<td><strong>{l["nome"]}</strong></td>'
-            f'<td class="mono">{qtd_br(l["est"])} {l["un"]}</td>'
-            f'<td class="mono">{qtd_br(l["consumo_dia"])} {l["un"]}/dia</td>'
-            f'<td>{situacao}</td>'
-            f'<td style="color:var(--t3);">{data_txt}</td>'
-            f'</tr>'
-        )
+    for m in movs_pag:
+        prod   = (m.get("produto") or {}).get("nome","—")
+        cod    = (m.get("produto") or {}).get("codigo_interno","—")
+        eu     = (m.get("exe") or {}).get("nick","—")
+        tp     = badge(m.get("tipo_entrada","—"), "concluido")
+        un_lbl = sigla_para_opcao(m.get("unidade_informada","UN"))
+        nf     = m.get("numero_nf") or "—"
+        obs    = m.get("observacao") or "—"
+        rows  += (f'<tr>'
+                  f'<td style="color:var(--t3);font-size:.73rem;">{datahora_br(m["criado_em"])}</td>'
+                  f'<td><strong>{prod}</strong></td>'
+                  f'<td class="mono">{cod}</td>'
+                  f'<td style="font-weight:600;">{qtd_br(m["quantidade_informada"])} {un_lbl}</td>'
+                  f'<td>{tp}</td>'
+                  f'<td style="color:var(--t3);">{nf}</td>'
+                  f'<td style="color:var(--t3);font-size:.72rem;">{obs[:30]}{"…" if len(obs)>30 else ""}</td>'
+                  f'<td style="color:var(--t3);">{eu}</td>'
+                  f'</tr>')
     st.markdown(
         f'<table class="tbl"><thead><tr>'
-        f'<th>Produto</th><th>Estoque Atual</th><th>Consumo Médio</th><th>Situação</th><th>Repor até</th>'
+        f'<th>Data/Hora</th><th>Produto</th><th>Código</th>'
+        f'<th>Qtd</th><th>Tipo</th><th>NF</th><th>Obs/CNR</th><th>Executor</th>'
         f'</tr></thead><tbody>{rows}</tbody></table>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div style="font-size:.72rem;color:var(--t3);margin-top:.5rem;">'
-        f'Cálculo baseado no consumo médio dos últimos {dias_janela} dias de movimentação.</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+        unsafe_allow_html=True)
 
-
-# ── Gráfico de consumo geral ────────────────────────────────────
-
-def _consumo_geral(consumo):
-    st.markdown(
-        '<div class="card"><div class="card-h">📊 Consumo por Setor (total)</div>',
-        unsafe_allow_html=True,
-    )
-    if not consumo:
-        st.markdown(
-            '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1rem">Sem dados.</p>',
-            unsafe_allow_html=True,
-        )
-    else:
-        cores = ["#CC0000","#E53535","#FF6666","#FF9999","#8B0000","#B22222","#DC143C","#F08080"]
-        fig = go.Figure(go.Bar(
-            x=list(consumo.keys()), y=list(consumo.values()),
-            marker=dict(color=cores[:len(consumo)], line=dict(width=0)),
-            hovertemplate="<b>%{x}</b><br>%{y:.0f}<extra></extra>",
-        ))
-        fig.update_layout(
-            **_PL, height=220,
-            xaxis=dict(gridcolor="rgba(0,0,0,.05)", tickfont=dict(size=10)),
-            yaxis=dict(gridcolor="rgba(0,0,0,.05)"),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def _pie(s):
-    st.markdown(
-        '<div class="card"><div class="card-h">📦 Status Inventário</div>',
-        unsafe_allow_html=True,
-    )
-    fig = go.Figure(go.Pie(
-        labels=["OK","Estoque Baixo","Estoque Zerado"],
-        values=[s["ok"], s["baixos"], s["criticos"]],
-        hole=0.65,
-        marker=dict(
-            colors=["#16A34A","#D97706","#DC2626"],
-            line=dict(color="rgba(255,255,255,.15)", width=2),
-        ),
-        hovertemplate="<b>%{label}</b>: %{value}<extra></extra>",
-    ))
-    fig.update_layout(
-        **_PL, height=220,
-        annotations=[dict(
-            text=f"<b>{s['total_produtos']}</b>",
-            x=.5, y=.5, font_size=22, showarrow=False,
-        )],
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def _recentes(r):
-    st.markdown(
-        '<div class="card"><div class="card-h">🔄 Movimentações Recentes</div>',
-        unsafe_allow_html=True,
-    )
-    hoje      = datetime.date.today()
-    ini_pad   = hoje - datetime.timedelta(days=30)
-    ca, cb    = st.columns(2)
-    with ca: d_ini = st.date_input("De",  value=ini_pad, key="rec_ini")
-    with cb: d_fim = st.date_input("Até", value=hoje,    key="rec_fim")
-
-    # Busca movimentações; tenta filtrar por data se o banco suportar, senão filtra em Python
-    try:
-        movs = listar_movimentacoes(
-            limite=500,
-            data_inicio=d_ini.strftime("%Y-%m-%d"),
-            data_fim=d_fim.strftime("%Y-%m-%d"),
-        )
-    except TypeError:
-        # fallback: função não aceita parâmetros de data — filtra em Python
-        movs = listar_movimentacoes(limite=500)
-        movs = [
-            m for m in movs
-            if d_ini.strftime("%Y-%m-%d") <= (m.get("criado_em") or "")[:10] <= d_fim.strftime("%Y-%m-%d")
-        ]
-
-    if d_ini > d_fim:
-        st.warning("Data início deve ser anterior à data fim.")
-    elif not movs:
-        st.markdown(
-            '<p style="color:var(--t3);font-size:.82rem;">Nenhuma movimentação no período.</p>',
-            unsafe_allow_html=True,
-        )
-    else:
-        rows = ""
-        for m in movs:
-            prod_info = m.get("produtos") or m.get("produto") or {}
-            prod   = prod_info.get("nome") or m.get("produto_nome") or "—"
-            setor  = m.get("setor_solicitante") or "—"
-            cor    = "var(--ok)" if m["tipo"] == "entrada" else "var(--err)"
-            sinal  = "+" if m["tipo"] == "entrada" else "-"
-            tipo_lbl = "📥" if m["tipo"] == "entrada" else "📤"
-            rows += (
-                f'<tr>'
-                f'<td style="color:var(--t3);font-size:.73rem;white-space:nowrap;">{datahora_br(m["criado_em"])}</td>'
-                f'<td>{prod[:28]}{"…" if len(prod)>28 else ""}</td>'
-                f'<td style="color:{cor};font-weight:700;font-family:var(--mono);">'
-                f'{tipo_lbl} {sinal}{qtd_br(m["quantidade_informada"])} {m["unidade_informada"]}</td>'
-                f'<td style="font-size:.78rem;">{setor[:20]}{"…" if len(setor)>20 else ""}</td>'
-                f'</tr>'
-            )
-        # Altura fixa para 10 linhas (~38px cada) — rola se houver mais
-        st.markdown(
-            f'<div style="max-height:390px;overflow-y:auto;border-radius:5px;">'
-            f'<table class="tbl"><thead><tr>'
-            f'<th>Data/Hora</th><th>Produto</th><th>Movimentação</th><th>Setor Solicitante</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table></div>'
-            f'<div style="font-size:.72rem;color:var(--t3);margin-top:.4rem;">'
-            f'{len(movs)} registro(s) no período</div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def _atencao(produtos):
-    at = [
-        (p, *status_estoque(
-            float(p["quantidade_total_secundaria"]),
-            float(p["estoque_minimo_primario"]),
-            float(p["fator_conversao"]),
-        ))
-        for p in produtos
-    ]
-    # Exibe APENAS itens fora do normal — ao voltar ao estoque OK saem automaticamente
-    at = [x for x in at if x[2] != "ok"]
-    at_sorted = sorted(at, key=lambda x: float(x[0]["quantidade_total_secundaria"]))
-
-    criticos_n = sum(1 for _, _, cls in at_sorted if cls == "err")
-    baixos_n   = sum(1 for _, _, cls in at_sorted if cls == "warn")
-
-    st.markdown(
-        '<div class="card"><div class="card-h">🚨 Produtos em Atenção</div>',
-        unsafe_allow_html=True,
-    )
-
-    if not at_sorted:
-        st.markdown(
-            '<p style="color:var(--ok);font-size:.87rem;padding:.3rem 0;">✅ Todos os produtos estão com estoque OK.</p>',
-            unsafe_allow_html=True,
-        )
-    else:
-        # Mini-resumo dentro do card
-        resumo_partes = []
-        if criticos_n: resumo_partes.append(f'<span style="color:var(--err);font-weight:700;">{criticos_n} zerado(s)</span>')
-        if baixos_n:   resumo_partes.append(f'<span style="color:var(--warn);font-weight:700;">{baixos_n} baixo(s)</span>')
-        st.markdown(
-            f'<div style="font-size:.78rem;color:var(--t3);margin-bottom:.5rem;">'
-            f'{" · ".join(resumo_partes)} — role para ver todos</div>',
-            unsafe_allow_html=True,
-        )
-        rows = ""
-        for p, txt, cls in at_sorted:
-            nome = p["nome"]
-            est  = float(p["quantidade_total_secundaria"])
-            un   = p.get("unidade_secundaria","")
-            rows += (
-                f'<tr>'
-                f'<td>{nome[:28]}{"…" if len(nome)>28 else ""}</td>'
-                f'<td class="mono">{qtd_br(est)} {un}</td>'
-                f'<td>{badge(_rotulo_status(txt),cls)}</td>'
-                f'</tr>'
-            )
-        # max-height para 10 linhas (~38px) com scroll
-        st.markdown(
-            f'<div style="max-height:390px;overflow-y:auto;border-radius:5px;">'
-            f'<table class="tbl"><thead><tr>'
-            f'<th>Produto</th><th>Estoque</th><th>Status</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table></div>'
-            f'<div style="font-size:.72rem;color:var(--t3);margin-top:.4rem;">'
-            f'{len(at_sorted)} produto(s) em atenção</div>',
-            unsafe_allow_html=True,
-        )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════
-# ANÁLISE DE CONSUMO POR PERÍODO
-# ══════════════════════════════════════════════════════════════════
-
-def _secao_consumo_periodo():
-    st.markdown(
-        '<div class="card"><div class="card-h">📈 Análise de Consumo por Período</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Filtros ───────────────────────────────────────────────────
-    hoje       = datetime.date.today()
-    ini_padrao = hoje.replace(day=1)          # primeiro dia do mês atual
-
-    setores    = listar_setores()
-    set_nomes  = ["Todos os setores"] + [s["nome"] for s in setores]
-
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-    with col1:
-        data_ini = st.date_input("Data início", value=ini_padrao, key="dash_ini")
-    with col2:
-        data_fim = st.date_input("Data fim",    value=hoje,       key="dash_fim")
-    with col3:
-        setor_sel = st.selectbox("Setor", set_nomes, key="dash_setor")
-    with col4:
-        st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
-        buscar = st.button("Filtrar", type="primary", use_container_width=True, key="dash_filtrar")
-
-    if data_ini > data_fim:
-        st.warning("Data início deve ser anterior à data fim.")
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    # Executa na primeira carga e ao clicar Filtrar
-    if buscar or "dash_resultado" not in st.session_state:
-        setor_filtro = None if setor_sel == "Todos os setores" else setor_sel
-        dados = consumo_por_periodo(
-            data_ini.strftime("%Y-%m-%d"),
-            data_fim.strftime("%Y-%m-%d"),
-            setor_filtro,
-        )
-        st.session_state["dash_resultado"] = dados
-        st.session_state["dash_filtros"]   = {
-            "ini":   data_ini,
-            "fim":   data_fim,
-            "setor": setor_sel,
-        }
-
-    dados   = st.session_state.get("dash_resultado", [])
-    filtros = st.session_state.get("dash_filtros",   {})
-
-    if not dados:
-        st.markdown(
-            '<p style="color:var(--t3);font-size:.82rem;text-align:center;padding:1.5rem 0;">'
-            'Nenhuma saída encontrada no período selecionado.</p>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-        return
-
-    # ── Agrega por produto ────────────────────────────────────────
-    agrupado: dict[str, float] = {}
-    detalhes: list[dict]       = []
-
-    for row in dados:
-        prod_info = row.get("produto") or {}
-        nome      = prod_info.get("nome","—")
-        un        = prod_info.get("unidade_secundaria","UN")
-        qtd       = float(row.get("quantidade_convertida") or 0)
-        agrupado[f"{nome} ({un})"] = agrupado.get(f"{nome} ({un})", 0) + qtd
-        detalhes.append({
-            "Data":              datahora_br(row.get("criado_em","")),
-            "Produto":           nome,
-            "Qtd":               qtd,
-            "Unidade":           un,
-            "Setor":             row.get("setor_solicitante","—"),
-        })
-
-    # ── Gráfico de barras verticais ───────────────────────────────
-    nomes  = list(agrupado.keys())
-    valores= list(agrupado.values())
-    cores  = ["#CC0000","#E53535","#FF6666","#FF9999","#8B0000",
-              "#B22222","#DC143C","#F08080","#CD5C5C","#FA8072"]
-
-    titulo_periodo = (
-        f"{data_br(filtros.get('ini'))} a {data_br(filtros.get('fim'))}"
-        + (f" — {filtros.get('setor')}" if filtros.get("setor") != "Todos os setores" else "")
-    )
-
-    fig = go.Figure(go.Bar(
-        x=nomes, y=valores,
-        marker=dict(
-            color=cores[:len(nomes)] if len(nomes) <= len(cores)
-                  else ["#CC0000"] * len(nomes),
-            line=dict(width=0),
-        ),
-        text=[qtd_br(v) for v in valores],
-        textposition="outside",
-        hovertemplate="<b>%{x}</b><br>Consumo: %{y:.2f}<extra></extra>",
-    ))
-    fig.update_layout(
-        **_PL,
-        height=max(300, 80 + 40 * len(nomes)),
-        title=dict(text=f"Consumo: {titulo_periodo}", font=dict(size=12)),
-        xaxis=dict(
-            gridcolor="rgba(0,0,0,.05)",
-            tickfont=dict(size=10),
-            tickangle=-30 if len(nomes) > 6 else 0,
-        ),
-        yaxis=dict(gridcolor="rgba(0,0,0,.05)"),
-        bargap=0.35,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Tabela resumo ─────────────────────────────────────────────
-    with st.expander("📋 Ver tabela detalhada"):
-        rows = ""
-        for d in detalhes:
-            rows += (
-                f'<tr>'
-                f'<td style="color:var(--t3);font-size:.73rem;">{d["Data"]}</td>'
-                f'<td><strong>{d["Produto"]}</strong></td>'
-                f'<td style="font-weight:600;">{qtd_br(d["Qtd"])} {d["Unidade"]}</td>'
-                f'<td>{d["Setor"]}</td>'
-                f'</tr>'
-            )
-        st.markdown(
-            f'<table class="tbl"><thead><tr>'
-            f'<th>Data</th><th>Produto</th><th>Qtd</th><th>Setor</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Download Excel ────────────────────────────────────────────
-    st.markdown("**⬇️ Exportar dados**", unsafe_allow_html=False)
-    _excel_download(detalhes, titulo_periodo)
+    if total_paginas>1:
+        cn1,cn2,cn3=st.columns([1,2,1])
+        with cn1:
+            if st.button("← Anterior",disabled=(pagina<=1),key="hent_prev",use_container_width=True):
+                st.session_state["hent_pagina"]=pagina-1; st.rerun()
+        with cn2:
+            st.markdown(f'<div style="text-align:center;color:var(--t3);padding-top:.45rem;font-size:.72rem;">Página {pagina} de {total_paginas}</div>',unsafe_allow_html=True)
+        with cn3:
+            if st.button("Próxima →",disabled=(pagina>=total_paginas),key="hent_next",use_container_width=True):
+                st.session_state["hent_pagina"]=pagina+1; st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
-
-
-def _excel_download(detalhes: list, titulo: str):
-    """Gera arquivo Excel sem formatação a partir dos dados filtrados."""
-    try:
-        import openpyxl
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Consumo"
-
-        # Cabeçalho
-        headers = ["Data", "Produto", "Quantidade", "Unidade", "Setor"]
-        ws.append(headers)
-
-        # Dados
-        for d in detalhes:
-            ws.append([
-                d["Data"],
-                d["Produto"],
-                d["Qtd"],
-                d["Unidade"],
-                d["Setor"],
-            ])
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        nome_arq = f"consumo_{titulo[:30].replace(' ','_').replace('/','_')}.xlsx"
-        st.download_button(
-            label="📥 Baixar Excel",
-            data=buf.getvalue(),
-            file_name=nome_arq,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except ImportError:
-        # openpyxl não disponível — usa CSV como fallback
-        import csv, io as sio
-        buf = sio.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["Data","Produto","Quantidade","Unidade","Setor"])
-        for d in detalhes:
-            writer.writerow([d["Data"], d["Produto"], d["Qtd"], d["Unidade"], d["Setor"]])
-        nome_arq = f"consumo_{titulo[:30].replace(' ','_').replace('/','_')}.csv"
-        st.download_button(
-            label="📥 Baixar CSV",
-            data=buf.getvalue().encode("utf-8-sig"),
-            file_name=nome_arq,
-            mime="text/csv",
-        )
