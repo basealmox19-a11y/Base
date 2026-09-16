@@ -135,6 +135,9 @@ def _inv():
             if s.get("status") in ("pendente","aprovado"):
                 pid=(s.get("produto") or {}).get("id")
                 if pid: reservas[pid]=reservas.get(pid,0.0)+float(s.get("quantidade_convertida") or 0)
+    if "inv_status_filtro_pending" in st.session_state:
+        st.session_state["inv_status_filtro"]=st.session_state.pop("inv_status_filtro_pending")
+
     c1,c2,c3=st.columns([3,2,2])
     with c1: busca=st.text_input("🔍 Buscar",key="eb2")
     with c2: cf=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats])
@@ -160,7 +163,7 @@ def _inv():
             ativo=(so_estr_atual==so_estr) and (so_estr or sf==status_alvo)
             if st.button(f"{icone} {rotulo} — {valor}",use_container_width=True,
                          type="primary" if ativo else "secondary",key=f"kpi_card_{rotulo}"):
-                st.session_state["inv_status_filtro"]=status_alvo
+                st.session_state["inv_status_filtro_pending"]=status_alvo
                 st.session_state["inv_somente_estrategicos"]=so_estr
                 st.rerun()
 
