@@ -151,6 +151,50 @@ def atualizar_produto(pid, dados):
         _log.error("atualizar_produto: %s", e)
         st.error("❌ Erro ao atualizar produto.")
 
+# ── CLASSIFICAÇÕES MANUAIS DE PRODUTO (tabela auxiliar, não altera "produtos") ──
+# Guarda marcações como "essencial" e "reposição contínua" numa tabela própria
+# (produto_flags), para não precisar alterar o schema da tabela "produtos".
+
+def listar_classificacoes_produtos() -> dict:
+    """Retorna {produto_id: {'essencial':bool,'reposicao_continua':bool}} a partir de produto_flags."""
+    try:
+        linhas = get_sb().table("produto_flags").select("produto_id,essencial,reposicao_continua").execute().data or []
+        return {l["produto_id"]: l for l in linhas}
+    except Exception as e:
+        _log.error("listar_classificacoes_produtos: %s", e)
+        return {}
+
+def mesclar_classificacoes(produtos: list) -> list:
+    """Injeta em cada produto (in-place) as flags 'essencial' e 'reposicao_continua'
+    vindas da tabela produto_flags. Não toca na tabela produtos nem no resultado de
+    listar_produtos() além de adicionar essas duas chaves no dicionário em memória."""
+    flags = listar_classificacoes_produtos()
+    for p in produtos:
+        f = flags.get(p["id"], {})
+        p["essencial"] = bool(f.get("essencial", False))
+        p["reposicao_continua"] = bool(f.get("reposicao_continua", False))
+    return produtos
+
+def definir_classificacao_produto(produto_id: str, campo: str, valor: bool) -> bool:
+    """Marca/desmarca 'essencial' ou 'reposicao_continua' para um produto (upsert em produto_flags)."""
+    if campo not in ("essencial", "reposicao_continua"):
+        raise ValueError("campo inválido: use 'essencial' ou 'reposicao_continua'")
+    try:
+        get_sb().table("produto_flags").upsert(
+            {"produto_id": produto_id, campo: valor}, on_conflict="produto_id"
+        ).execute()
+        return True
+    except Exception as e:
+        _log.error("definir_classificacao_produto: %s", e)
+        st.error("❌ Erro ao salvar classificação do insumo.")
+        return False
+
+def listar_produtos_essenciais(apenas_ativos=True) -> list:
+    """Retorna apenas os produtos marcados manualmente como essenciais (prioridade de estoque/previsão)."""
+    prods = listar_produtos(apenas_ativos=apenas_ativos)
+    mesclar_classificacoes(prods)
+    return [p for p in prods if p.get("essencial")]
+
 # ── ESTOQUE COM RESERVAS ─────────────────────────────────────────
 def estoque_disponivel(produto_id: str) -> float:
     try:
@@ -199,6 +243,18 @@ def registrar_movimentacao(dados) -> dict:
     except Exception as e:
         _log.error("registrar_movimentacao: %s", e)
         st.error("❌ Erro ao registrar movimentação."); st.stop()
+
+def registrar_entrada_com_valor(dados_mov: dict) -> dict:
+    """Registra uma movimentação de entrada/reabastecimento e, se 'valor_unitario' foi
+    informado no dicionário, também atualiza o cache 'valor_unitario' (Valor última
+    compra) no produto. O valor informado já fica salvo na própria movimentação —
+    preparação para o futuro histórico de variação de preços por produto."""
+    mov = registrar_movimentacao(dados_mov)
+    valor = dados_mov.get("valor_unitario")
+    pid   = dados_mov.get("produto_id")
+    if valor is not None and pid:
+        atualizar_produto(pid, {"valor_unitario": valor})
+    return mov
 
 def atualizar_movimentacao(mid, dados) -> dict:
     try: return get_sb().table("movimentacoes").update(dados).eq("id",mid).execute().data[0]
@@ -313,14 +369,9 @@ def consumo_por_periodo(data_ini, data_fim, setor=None) -> list:
 # ── DASHBOARD ────────────────────────────────────────────────────
 def stats_dashboard() -> dict:
     _vazio = {"total_produtos":0,"criticos":0,"baixos":0,"ok":0,"pend_solicitacoes":0,
-              "pend_notas":0,"total_movimentacoes":0,"consumo_setor":{},"parados":0,"recentes":[],
-              "produtos":[],"inativos":0,"produtos_inativos":[]}
+              "pend_notas":0,"total_movimentacoes":0,"consumo_setor":{},"parados":0,"recentes":[],"produtos":[]}
     try:
         sb = get_sb(); prods = listar_produtos()
-        # Produtos inativos ficam de fora de listar_produtos() por padrão (apenas_ativos=True),
-        # então busca-se a lista completa só para apurar quantos/quais estão inativos.
-        todos = listar_produtos(apenas_ativos=False)
-        produtos_inativos = [p for p in todos if not p.get("ativo", True)]
         criticos=baixos=ok_c=0
         for p in prods:
             est=float(p.get("quantidade_total_secundaria") or 0)
@@ -344,8 +395,7 @@ def stats_dashboard() -> dict:
         recentes=sb.table("movimentacoes").select("criado_em,tipo,quantidade_informada,unidade_informada,status,produtos(nome)").order("criado_em",desc=True).limit(10).execute().data or []
         return {"total_produtos":len(prods),"criticos":criticos,"baixos":baixos,"ok":ok_c,
                 "pend_solicitacoes":pend_sol,"pend_notas":pend_nf,"total_movimentacoes":total_mov,
-                "consumo_setor":consumo,"parados":parados,"recentes":recentes,"produtos":prods,
-                "inativos":len(produtos_inativos),"produtos_inativos":produtos_inativos}
+                "consumo_setor":consumo,"parados":parados,"recentes":recentes,"produtos":prods}
     except Exception as e:
         _log.error("stats_dashboard: %s", e)
         return _vazio
@@ -458,8 +508,7 @@ def historico_saidas_previsao(dias: int = 120) -> list:
         return (get_sb().table("movimentacoes")
                 .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
                         "produto:produtos(id,nome,codigo_interno,unidade_primaria,unidade_secundaria,"
-                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,"
-                        "categoria_id,categorias(nome))")
+                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao)")
                 .eq("tipo","saida").eq("status","concluido")
                 .not_.is_("tipo_saida","null")
                 .gte("criado_em", lim)
