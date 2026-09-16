@@ -279,7 +279,10 @@ def _inv():
         cs,cb=st.columns([4,1])
         with cs: sel=st.selectbox("Produto",list(pm.keys()),key="sel_hist",label_visibility="collapsed")
         with cb:
-            if st.button("📊 Ver Histórico",use_container_width=True,key="btn_hist"): st.session_state["hist_produto"]=pm[sel]; st.rerun()
+            if st.button("📊 Ver Histórico",use_container_width=True,key="btn_hist"):
+                for _k in ("hist_f_tipo","hist_f_subtipo","hist_f_setor","hist_f_resp","hist_f_nf"):
+                    st.session_state.pop(f"{_k}_{pm[sel]['id']}",None)
+                st.session_state["hist_produto"]=pm[sel]; st.rerun()
     if st.session_state.get("hist_produto"): _hist_modal(st.session_state["hist_produto"])
 
     if st.session_state.get("foto_produto"): _foto_modal(st.session_state["foto_produto"])
@@ -311,8 +314,41 @@ def _hist_modal(prod):
                       xaxis=dict(gridcolor="rgba(0,0,0,.05)"),yaxis=dict(gridcolor="rgba(0,0,0,.05)",title=f"Qtd ({us_lbl})"))
     st.plotly_chart(fig,use_container_width=True)
     st.markdown(f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);letter-spacing:.06em;text-transform:uppercase;margin:.8rem 0 .4rem;">Detalhamento</div>',unsafe_allow_html=True)
+
+    tipos_disp=sorted({("Entrada" if m.get("tipo")=="entrada" else "Saída") for m in movs})
+    subtipos_disp=sorted({(m.get("tipo_entrada") or m.get("tipo_saida") or "—") for m in movs})
+    setores_disp=sorted({(m.get("setor_solicitante") or "—") for m in movs})
+    resp_disp=sorted({((m.get("exe") or {}).get("nick") or (m.get("sol") or {}).get("nick") or "—") for m in movs})
+
+    fc1,fc2,fc3,fc4,fc5=st.columns(5)
+    with fc1: f_tipo=st.multiselect("Tipo",tipos_disp,key=f"hist_f_tipo_{prod['id']}")
+    with fc2: f_subtipo=st.multiselect("Subtipo",subtipos_disp,key=f"hist_f_subtipo_{prod['id']}")
+    with fc3: f_setor=st.multiselect("Setor",setores_disp,key=f"hist_f_setor_{prod['id']}")
+    with fc4: f_resp=st.multiselect("Responsável",resp_disp,key=f"hist_f_resp_{prod['id']}")
+    with fc5: f_nf=st.text_input("NF",key=f"hist_f_nf_{prod['id']}")
+
+    def _passa_filtro(m):
+        tipo_lbl="Entrada" if m.get("tipo")=="entrada" else "Saída"
+        subtipo=m.get("tipo_entrada") or m.get("tipo_saida") or "—"
+        setor=m.get("setor_solicitante") or "—"
+        resp=(m.get("exe") or {}).get("nick") or (m.get("sol") or {}).get("nick") or "—"
+        nf=str(m.get("numero_nf") or "")
+        if f_tipo and tipo_lbl not in f_tipo: return False
+        if f_subtipo and subtipo not in f_subtipo: return False
+        if f_setor and setor not in f_setor: return False
+        if f_resp and resp not in f_resp: return False
+        if f_nf.strip() and f_nf.strip().lower() not in nf.lower(): return False
+        return True
+
+    movs_det=[m for m in movs if _passa_filtro(m)]
+
+    if not movs_det:
+        st.markdown(f'<div style="text-align:center;color:var(--t3);font-size:{FS_SUB};padding:1.5rem;">Nenhum resultado para os filtros aplicados</div>', unsafe_allow_html=True)
+        st.markdown("</div>",unsafe_allow_html=True)
+        return
+
     rows=""
-    for m in reversed(movs):
+    for m in reversed(movs_det):
         tipo=m.get("tipo",""); cor="var(--ok)" if tipo=="entrada" else "var(--err)"
         sinal="+"; tipo_lbl="📥 Entrada" if tipo=="entrada" else "📤 Saída"
         if tipo!="entrada": sinal="-"
