@@ -1,0 +1,33 @@
+-- Tabela auxiliar para classificações manuais de produto (essencial / reposição contínua).
+-- Não altera a tabela "produtos" — é 100% aditiva, então o sistema atual continua
+-- funcionando exatamente como está, mesmo que essa tabela não exista ainda.
+create table if not exists produto_flags (
+    produto_id          uuid primary key references produtos(id) on delete cascade,
+    essencial           boolean not null default false,
+    reposicao_continua  boolean not null default false,
+    atualizado_em       timestamptz not null default now()
+);
+
+-- Mantém "atualizado_em" sempre em dia quando uma flag é alterada
+create or replace function set_atualizado_em()
+returns trigger as $$
+begin
+  new.atualizado_em = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists trg_produto_flags_atualizado_em on produto_flags;
+create trigger trg_produto_flags_atualizado_em
+before update on produto_flags
+for each row execute function set_atualizado_em();
+
+-- Valor unitário do produto — preparação para o futuro histórico de variação de preços.
+
+-- Cache do valor mais recente, exibido em Estoque como "Valor Última Compra"
+alter table produtos add column if not exists valor_unitario numeric(12,2);
+
+-- Valor informado em CADA entrada/reabastecimento — o histórico de variação de preço
+-- já nasce pronto aqui dentro de "movimentacoes" (basta filtrar tipo='entrada' e
+-- ordenar por criado_em quando formos construir esse recurso, sem precisar de tabela nova).
+alter table movimentacoes add column if not exists valor_unitario numeric(12,2);
