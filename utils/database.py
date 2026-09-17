@@ -508,7 +508,7 @@ def historico_saidas_previsao(dias: int = 120) -> list:
         return (get_sb().table("movimentacoes")
                 .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
                         "produto:produtos(id,nome,codigo_interno,unidade_primaria,unidade_secundaria,"
-                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao)")
+                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,ativo,valor_unitario)")
                 .eq("tipo","saida").eq("status","concluido")
                 .not_.is_("tipo_saida","null")
                 .gte("criado_em", lim)
@@ -527,7 +527,7 @@ def historico_entradas_previsao(dias: int = 120) -> list:
         from datetime import datetime, timedelta
         lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
         return (get_sb().table("movimentacoes")
-                .select("criado_em,produto_id,quantidade_convertida")
+                .select("criado_em,produto_id,quantidade_convertida,valor_unitario")
                 .eq("tipo","entrada").eq("status","concluido")
                 .or_("tipo_entrada.is.null,tipo_entrada.neq.Ajuste Manual")
                 .gte("criado_em", lim)
