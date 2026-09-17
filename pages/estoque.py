@@ -127,6 +127,13 @@ def _inv():
     prods=listar_produtos(); cats=listar_categorias()
     if not prods: st.info("Nenhum produto."); return
     mesclar_classificacoes(prods)
+
+    # Aplica overrides pendentes vindos dos cards de KPI. Precisa acontecer ANTES de
+    # qualquer widget com a mesma key ser instanciado nesta execução — do contrário
+    # o Streamlit recusa a escrita em session_state (StreamlitAPIException).
+    for k,v in st.session_state.pop("inv_overrides",{}).items():
+        st.session_state[k]=v
+
     ver_reserva=is_almoxarife()
     pode_classificar=is_admin() or is_almoxarife()
     reservas={}
@@ -135,36 +142,31 @@ def _inv():
             if s.get("status") in ("pendente","aprovado"):
                 pid=(s.get("produto") or {}).get("id")
                 if pid: reservas[pid]=reservas.get(pid,0.0)+float(s.get("quantidade_convertida") or 0)
-    if "inv_status_filtro_pending" in st.session_state:
-        st.session_state["inv_status_filtro"]=st.session_state.pop("inv_status_filtro_pending")
 
-    c1,c2,c3=st.columns([3,2,2])
-    with c1: busca=st.text_input("🔍 Buscar",key="eb2")
-    with c2: cf=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats])
-    with c3: sf=st.selectbox("Status",["Todos","OK","Estoque Baixo","Estoque Zerado"],key="inv_status_filtro")
     total=len(prods)
     criticos=sum(1 for p in prods if float(p["quantidade_total_secundaria"])<=0)
     baixos=sum(1 for p in prods if 0<float(p["quantidade_total_secundaria"])<=float(p["estoque_minimo_primario"])*float(p["fator_conversao"]))
     ok_c=total-criticos-baixos
     estrategicos_c=sum(1 for p in prods if p.get("essencial"))
-    so_estr_atual=st.session_state.get("inv_somente_estrategicos",False)
 
     # Cards de KPI clicáveis: clicar em um deles filtra o inventário abaixo.
+    status_atual=st.session_state.get("inv_status_filtro","Todos")
+    estr_atual=st.session_state.get("inv_estrategico_filtro","Todos")
     _CARDS_KPI=[
-        ("📦","Total",total,"Todos",False),
-        ("🟢","OK",ok_c,"OK",False),
-        ("🟠","Estoque Baixo",baixos,"Estoque Baixo",False),
-        ("🔴","Estoque Zerado",criticos,"Estoque Zerado",False),
-        ("⭐","Estratégicos",estrategicos_c,"Todos",True),
+        ("📦","Total",total,{"inv_status_filtro":"Todos","inv_estrategico_filtro":"Todos","inv_reposicao_filtro":"Todos","inv_f_produto":"","inv_f_codigo":"","inv_f_ean":"","inv_f_categoria":"Todas"}),
+        ("🟢","OK",ok_c,{"inv_status_filtro":"OK","inv_estrategico_filtro":"Todos"}),
+        ("🟠","Estoque Baixo",baixos,{"inv_status_filtro":"Estoque Baixo","inv_estrategico_filtro":"Todos"}),
+        ("🔴","Estoque Zerado",criticos,{"inv_status_filtro":"Estoque Zerado","inv_estrategico_filtro":"Todos"}),
+        ("⭐","Estratégicos",estrategicos_c,{"inv_status_filtro":"Todos","inv_estrategico_filtro":"Sim"}),
     ]
     cB=st.columns(5)
-    for col,(icone,rotulo,valor,status_alvo,so_estr) in zip(cB,_CARDS_KPI):
+    for col,(icone,rotulo,valor,overrides) in zip(cB,_CARDS_KPI):
         with col:
-            ativo=(so_estr_atual==so_estr) and (so_estr or sf==status_alvo)
+            ativo=(status_atual==overrides.get("inv_status_filtro","Todos")
+                   and estr_atual==overrides.get("inv_estrategico_filtro","Todos"))
             if st.button(f"{icone} {rotulo} — {valor}",use_container_width=True,
                          type="primary" if ativo else "secondary",key=f"kpi_card_{rotulo}"):
-                st.session_state["inv_status_filtro_pending"]=status_alvo
-                st.session_state["inv_somente_estrategicos"]=so_estr
+                st.session_state["inv_overrides"]=overrides
                 st.rerun()
 
     if ver_reserva:
@@ -178,20 +180,50 @@ def _inv():
             key="btn_export_inv",
         )
 
-    fil=prods
-    if busca.strip():
-        b=busca.lower(); fil=[p for p in fil if b in p["nome"].lower() or b in p["codigo_interno"].lower() or (p.get("ean") and b in p["ean"].lower())]
-    if cf!="Todas": fil=[p for p in fil if p.get("categorias") and p["categorias"]["nome"]==cf]
-    if sf!="Todos":
-        def _s(p): t,_=status_estoque(float(p["quantidade_total_secundaria"]),float(p["estoque_minimo_primario"]),float(p["fator_conversao"])); return _rotulo_status(t)
-        fil=[p for p in fil if _s(p)==sf]
-    if so_estr_atual:
-        fil=[p for p in fil if p.get("essencial")]
-    st.markdown(f'<div class="card"><div class="card-h">Produtos ({len(fil)})</div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="card"><div class="card-h">Produtos</div>',unsafe_allow_html=True)
+
+    # --- Filtros por coluna (mesmo padrão de Solicitações) ---
+    head_ratio = [1.65, 0.72, 0.8, 1.0, 1.35, 0.8, 1.0, 0.8, 0.95, 1.05, 0.6]
+    heads = ["Produto","Código","EAN","Categoria","Estoque","Mínimo","Valor Última Compra","Status","Estratégico","Repos. Contínua","Foto"]
+
+    fc = st.columns(head_ratio)
+    with fc[0]: f_produto=st.text_input("Produto",placeholder="🔍 Produto…",key="inv_f_produto",label_visibility="collapsed")
+    with fc[1]: f_codigo=st.text_input("Código",placeholder="🔍 Código…",key="inv_f_codigo",label_visibility="collapsed")
+    with fc[2]: f_ean=st.text_input("EAN",placeholder="🔍 EAN…",key="inv_f_ean",label_visibility="collapsed")
+    with fc[3]: f_categoria=st.selectbox("Categoria",["Todas"]+[c["nome"] for c in cats],key="inv_f_categoria",label_visibility="collapsed")
+    with fc[4]: st.markdown("&nbsp;",unsafe_allow_html=True)
+    with fc[5]: st.markdown("&nbsp;",unsafe_allow_html=True)
+    with fc[6]: st.markdown("&nbsp;",unsafe_allow_html=True)
+    with fc[7]: f_status=st.selectbox("Status",["Todos","OK","Estoque Baixo","Estoque Zerado"],key="inv_status_filtro",label_visibility="collapsed")
+    with fc[8]: f_estrategico=st.selectbox("Estratégico",["Todos","Sim","Não"],key="inv_estrategico_filtro",label_visibility="collapsed")
+    with fc[9]: f_reposicao=st.selectbox("Repos. Contínua",["Todos","Sim","Não"],key="inv_reposicao_filtro",label_visibility="collapsed")
+    with fc[10]: st.markdown("&nbsp;",unsafe_allow_html=True)
+
+    hc = st.columns(head_ratio)
+    for col, txt in zip(hc, heads):
+        col.markdown(
+            f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);'
+            f'letter-spacing:.04em;text-transform:uppercase;border-bottom:1px solid var(--bdr);'
+            f'padding-bottom:.4rem;margin-bottom:.35rem;line-height:1.25;">{txt}</div>', unsafe_allow_html=True)
+
+    def _passa(p):
+        if f_produto.strip() and f_produto.strip().lower() not in p["nome"].lower(): return False
+        if f_codigo.strip() and f_codigo.strip().lower() not in p["codigo_interno"].lower(): return False
+        if f_ean.strip() and f_ean.strip().lower() not in (p.get("ean") or "").lower(): return False
+        if f_categoria!="Todas" and (not p.get("categorias") or p["categorias"]["nome"]!=f_categoria): return False
+        if f_status!="Todos":
+            t,_=status_estoque(float(p["quantidade_total_secundaria"]),float(p["estoque_minimo_primario"]),float(p["fator_conversao"]))
+            if _rotulo_status(t)!=f_status: return False
+        if f_estrategico!="Todos" and bool(p.get("essencial"))!=(f_estrategico=="Sim"): return False
+        if f_reposicao!="Todos" and bool(p.get("reposicao_continua"))!=(f_reposicao=="Sim"): return False
+        return True
+
+    fil=[p for p in prods if _passa(p)]
+    st.markdown(f'<div style="font-size:{FS_SUB};color:var(--t3);margin:.2rem 0 .5rem;">{len(fil)} de {total} produto(s)</div>',unsafe_allow_html=True)
 
     # --- Paginação ---
     OPCOES_PP=[10,20,40]
-    filtro_sig=f"{busca}|{cf}|{sf}|{so_estr_atual}"
+    filtro_sig=f"{f_produto}|{f_codigo}|{f_ean}|{f_categoria}|{f_status}|{f_estrategico}|{f_reposicao}"
     if st.session_state.get("inv_filtro_sig")!=filtro_sig:
         st.session_state["inv_filtro_sig"]=filtro_sig
         st.session_state["inv_pagina"]=1
@@ -212,14 +244,6 @@ def _inv():
     fil_pag=fil[ini:fim]
 
     if fil_pag:
-        head_ratio = [1.65, 0.72, 0.8, 1.0, 1.35, 0.8, 1.0, 0.8, 0.95, 1.05, 0.6]
-        heads = ["Produto","Código","EAN","Categoria","Estoque","Mínimo","Valor Última Compra","Status","Estratégico","Repos. Contínua","Foto"]
-        hc = st.columns(head_ratio)
-        for col, txt in zip(hc, heads):
-            col.markdown(
-                f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);'
-                f'letter-spacing:.04em;text-transform:uppercase;border-bottom:1px solid var(--bdr);'
-                f'padding-bottom:.4rem;margin-bottom:.35rem;line-height:1.25;">{txt}</div>', unsafe_allow_html=True)
         for p in fil_pag:
             est=float(p["quantidade_total_secundaria"]); minp=float(p["estoque_minimo_primario"]); fat=float(p["fator_conversao"])
             estp=est/fat if fat else 0; txt,cls=status_estoque(est,minp,fat); txt=_rotulo_status(txt)
@@ -279,10 +303,7 @@ def _inv():
         cs,cb=st.columns([4,1])
         with cs: sel=st.selectbox("Produto",list(pm.keys()),key="sel_hist",label_visibility="collapsed")
         with cb:
-            if st.button("📊 Ver Histórico",use_container_width=True,key="btn_hist"):
-                for _k in ("hist_f_tipo","hist_f_subtipo","hist_f_setor","hist_f_resp","hist_f_nf"):
-                    st.session_state.pop(f"{_k}_{pm[sel]['id']}",None)
-                st.session_state["hist_produto"]=pm[sel]; st.rerun()
+            if st.button("📊 Ver Histórico",use_container_width=True,key="btn_hist"): st.session_state["hist_produto"]=pm[sel]; st.rerun()
     if st.session_state.get("hist_produto"): _hist_modal(st.session_state["hist_produto"])
 
     if st.session_state.get("foto_produto"): _foto_modal(st.session_state["foto_produto"])
@@ -314,41 +335,8 @@ def _hist_modal(prod):
                       xaxis=dict(gridcolor="rgba(0,0,0,.05)"),yaxis=dict(gridcolor="rgba(0,0,0,.05)",title=f"Qtd ({us_lbl})"))
     st.plotly_chart(fig,use_container_width=True)
     st.markdown(f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);letter-spacing:.06em;text-transform:uppercase;margin:.8rem 0 .4rem;">Detalhamento</div>',unsafe_allow_html=True)
-
-    tipos_disp=sorted({("Entrada" if m.get("tipo")=="entrada" else "Saída") for m in movs})
-    subtipos_disp=sorted({(m.get("tipo_entrada") or m.get("tipo_saida") or "—") for m in movs})
-    setores_disp=sorted({(m.get("setor_solicitante") or "—") for m in movs})
-    resp_disp=sorted({((m.get("exe") or {}).get("nick") or (m.get("sol") or {}).get("nick") or "—") for m in movs})
-
-    fc1,fc2,fc3,fc4,fc5=st.columns(5)
-    with fc1: f_tipo=st.multiselect("Tipo",tipos_disp,key=f"hist_f_tipo_{prod['id']}")
-    with fc2: f_subtipo=st.multiselect("Subtipo",subtipos_disp,key=f"hist_f_subtipo_{prod['id']}")
-    with fc3: f_setor=st.multiselect("Setor",setores_disp,key=f"hist_f_setor_{prod['id']}")
-    with fc4: f_resp=st.multiselect("Responsável",resp_disp,key=f"hist_f_resp_{prod['id']}")
-    with fc5: f_nf=st.text_input("NF",key=f"hist_f_nf_{prod['id']}")
-
-    def _passa_filtro(m):
-        tipo_lbl="Entrada" if m.get("tipo")=="entrada" else "Saída"
-        subtipo=m.get("tipo_entrada") or m.get("tipo_saida") or "—"
-        setor=m.get("setor_solicitante") or "—"
-        resp=(m.get("exe") or {}).get("nick") or (m.get("sol") or {}).get("nick") or "—"
-        nf=str(m.get("numero_nf") or "")
-        if f_tipo and tipo_lbl not in f_tipo: return False
-        if f_subtipo and subtipo not in f_subtipo: return False
-        if f_setor and setor not in f_setor: return False
-        if f_resp and resp not in f_resp: return False
-        if f_nf.strip() and f_nf.strip().lower() not in nf.lower(): return False
-        return True
-
-    movs_det=[m for m in movs if _passa_filtro(m)]
-
-    if not movs_det:
-        st.markdown(f'<div style="text-align:center;color:var(--t3);font-size:{FS_SUB};padding:1.5rem;">Nenhum resultado para os filtros aplicados</div>', unsafe_allow_html=True)
-        st.markdown("</div>",unsafe_allow_html=True)
-        return
-
     rows=""
-    for m in reversed(movs_det):
+    for m in reversed(movs):
         tipo=m.get("tipo",""); cor="var(--ok)" if tipo=="entrada" else "var(--err)"
         sinal="+"; tipo_lbl="📥 Entrada" if tipo=="entrada" else "📤 Saída"
         if tipo!="entrada": sinal="-"
@@ -491,6 +479,21 @@ def _editar():
     if not prods: st.info("Nenhum produto."); return
     pm={f"{p['nome']} ({p['codigo_interno']})":p for p in prods}
     st.markdown('<div class="card"><div class="card-h">✏️ Editar Produto</div>',unsafe_allow_html=True)
+
+    # Tela de confirmação pós-edição — mesmo padrão do Ajuste Manual
+    if st.session_state.get("editar_sucesso"):
+        info=st.session_state["editar_sucesso"]
+        st.success("✅ Produto atualizado com sucesso!")
+        st.markdown(f'<div style="font-size:{FS_SUB};color:var(--t3);">Alterações em <strong>{esc(info["nome"])}</strong> salvas.</div>',unsafe_allow_html=True)
+        if st.button("✏️ Editar outro produto",type="primary",use_container_width=True):
+            st.session_state.pop(f"upe_{info['prod_id']}",None)
+            st.session_state.pop(f"use_{info['prod_id']}",None)
+            del st.session_state["editar_sucesso"]
+            st.rerun()
+        st.markdown("</div>",unsafe_allow_html=True)
+        return
+
+    # Selectbox fora do form -> troca de produto atualiza tudo na hora
     sel=st.selectbox("Produto",list(pm.keys()),key="eps"); p=pm[sel]
     with st.form("fep"):
         c1,c2=st.columns(2)
@@ -498,7 +501,9 @@ def _editar():
             ne=st.text_input("Nome",value=p["nome"])
             cc=next((c["nome"] for c in cats if c["id"]==p.get("categoria_id")),list(cm.keys())[0] if cm else "")
             ce=st.selectbox("Categoria",list(cm.keys()),index=list(cm.keys()).index(cc) if cc in cm else 0)
-            upe=_u("Unidade primária",val=p["unidade_primaria"],key="upe"); use=_u("Unidade secundária",val=p["unidade_secundaria"],key="use")
+            # key por produto -> reconhece automaticamente a unidade do insumo selecionado ao trocar de item
+            upe=_u("Unidade primária",val=p["unidade_primaria"],key=f"upe_{p['id']}")
+            use=_u("Unidade secundária",val=p["unidade_secundaria"],key=f"use_{p['id']}")
         with c2:
             fe=st.number_input("Fator",value=float(p["fator_conversao"]),min_value=0.001)
             eme=st.number_input("Est. mín (prim)",value=float(p["estoque_minimo_primario"]),min_value=0.0)
@@ -511,7 +516,8 @@ def _editar():
         st.caption("💡 Classificação de Estratégico / Reposição Contínua agora é feita direto na aba Inventário.")
         if st.form_submit_button("Salvar →",type="primary"):
             atualizar_produto(p["id"],{"nome":ne.strip(),"categoria_id":cm.get(ce),"unidade_primaria":upe,"unidade_secundaria":use,"fator_conversao":fe,"estoque_minimo_primario":eme,"ean":eane.strip() or None,"descricao":de.strip() or None,"ativo":ate,"foto_url":fote.strip() or None,"valor_unitario":ve if ve>0 else None})
-            st.success("✅ Produto atualizado!"); st.rerun()
+            st.session_state["editar_sucesso"]={"prod_id":p["id"],"nome":ne.strip()}
+            st.rerun()
     st.markdown("</div>",unsafe_allow_html=True)
 
 def _hist_aj():
@@ -520,15 +526,35 @@ def _hist_aj():
     if not aj: st.info("Nenhum ajuste registrado."); return
     st.markdown('<div class="card"><div class="card-h">Histórico de Ajustes</div>',unsafe_allow_html=True)
 
-    busca=st.text_input("🔍 Buscar por produto ou responsável",key="haj_busca")
-    if busca.strip():
-        b=busca.lower()
-        aj=[a for a in aj if b in (a.get("produto") or {}).get("nome","").lower()
-            or b in ((a.get("exe") or {}).get("nick","")).lower()]
+    # --- Filtros por coluna (mesmo padrão de Solicitações) ---
+    head_ratio=[1.3,1.6,1.2,1.8,1.2]
+    fc=st.columns(head_ratio)
+    with fc[0]:
+        f_data=st.date_input("Data",value=(),key="haj_f_data",label_visibility="collapsed")
+    with fc[1]: f_produto=st.text_input("Produto",placeholder="🔍 Produto…",key="haj_f_produto",label_visibility="collapsed")
+    with fc[2]: st.markdown("&nbsp;",unsafe_allow_html=True)
+    with fc[3]: f_motivo=st.text_input("Motivo",placeholder="🔍 Motivo…",key="haj_f_motivo",label_visibility="collapsed")
+    with fc[4]: f_resp=st.text_input("Responsável",placeholder="🔍 Responsável…",key="haj_f_resp",label_visibility="collapsed")
+
+    hc=st.columns(head_ratio)
+    for col,txt in zip(hc,["Data","Produto","Variação","Motivo","Responsável"]):
+        col.markdown(f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);letter-spacing:.04em;text-transform:uppercase;border-bottom:1px solid var(--bdr);padding-bottom:.4rem;margin-bottom:.35rem;">{txt}</div>',unsafe_allow_html=True)
+
+    def _passa(a):
+        if len(f_data)==2:
+            d0,d1=f_data
+            dm=datetime.datetime.fromisoformat(a["criado_em"].replace("Z","+00:00")).date()
+            if not (d0<=dm<=d1): return False
+        if f_produto.strip() and f_produto.strip().lower() not in (a.get("produto") or {}).get("nome","").lower(): return False
+        obs=(a.get("observacao") or "").replace("[AJUSTE] ","")
+        if f_motivo.strip() and f_motivo.strip().lower() not in obs.lower(): return False
+        if f_resp.strip() and f_resp.strip().lower() not in ((a.get("exe") or {}).get("nick","")).lower(): return False
+        return True
+    aj=[a for a in aj if _passa(a)]
 
     # --- Paginação (mesmo padrão do Inventário) ---
     OPCOES_PP=[10,20,40]
-    filtro_sig=f"{busca}"
+    filtro_sig=f"{f_data}|{f_produto}|{f_motivo}|{f_resp}"
     if st.session_state.get("haj_filtro_sig")!=filtro_sig:
         st.session_state["haj_filtro_sig"]=filtro_sig
         st.session_state["haj_pagina"]=1
