@@ -50,7 +50,7 @@ from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
 from openpyxl.utils import get_column_letter
-from utils.database import historico_saidas_previsao, historico_entradas_previsao
+from utils.database import historico_saidas_previsao, historico_entradas_previsao, listar_classificacoes_produtos
 from utils.auth import pode
 from utils.ui import kpi_html
 from utils.fmt import qtd_br
@@ -114,9 +114,52 @@ def tela_previsao_demanda():
 
 
 # ── Coleta e agregação ─────────────────────────────────────────────
+def _reconstruir_valor_saidas(movs_saida, entradas_prod, valor_unitario_fallback):
+    """Anota cada saída (in-place, mesmo dict compartilhado com base['setores'] e
+    base['setor_produto']) com 'valor' = qtd × Custo Médio Ponderado (CMP) vigente
+    na data da saída. O CMP é reconstruído cronologicamente a partir das entradas
+    valorizadas do produto (mesma lógica contábil de custo médio de estoque):
+    a cada entrada com valor_unitario informado, recalcula
+    novo_CMP = (saldo×CMP + qtd_entrada×valor_entrada) / (saldo+qtd_entrada).
+    Entrada sem valor informado só soma quantidade ao saldo, sem alterar o CMP
+    (evita zerar o custo por falta de dado pontual). Sem NENHUMA entrada valorizada
+    ainda no histórico do produto, usa valor_unitario_fallback (cache da última
+    compra, em produtos.valor_unitario) como CMP provisório — a estimativa fica
+    mais precisa conforme mais entradas com custo forem registradas."""
+    entradas_ordenadas = sorted(entradas_prod, key=lambda e: e["data"])
+    saidas_ordenadas = sorted(movs_saida, key=lambda s: s["data"])
+    saldo = 0.0
+    cmp = float(valor_unitario_fallback or 0)
+    ie, n_ent = 0, len(entradas_ordenadas)
+    for s in saidas_ordenadas:
+        while ie < n_ent and entradas_ordenadas[ie]["data"] <= s["data"]:
+            e = entradas_ordenadas[ie]
+            qtd_e = float(e.get("qtd") or 0)
+            val_e = e.get("valor_unitario")
+            if val_e is not None and qtd_e > 0:
+                novo_saldo = saldo + qtd_e
+                cmp = ((saldo * cmp) + (qtd_e * float(val_e))) / novo_saldo if novo_saldo > 0 else cmp
+                saldo = novo_saldo
+            else:
+                saldo += qtd_e  # entrada sem custo informado — só soma quantidade, mantém o CMP
+            ie += 1
+        s["valor"] = round(s["qtd"] * cmp, 2)
+        s["custo_unit"] = round(cmp, 4)
+        saldo = max(saldo - s["qtd"], 0.0)
+
 def _montar_base():
     hist = historico_saidas_previsao(DIAS_HISTORICO)
     entradas = historico_entradas_previsao(DIAS_HISTORICO)
+    flags = listar_classificacoes_produtos()
+
+    entradas_map = defaultdict(list)
+    for e in entradas:
+        pid = e.get("produto_id")
+        data = (e.get("criado_em") or "")[:10]
+        if not pid or not data:
+            continue
+        entradas_map[pid].append({"data": data, "qtd": float(e.get("quantidade_convertida") or 0),
+                                   "valor_unitario": e.get("valor_unitario")})
 
     produtos_map = {}
     setor_movs = defaultdict(list)
@@ -127,6 +170,11 @@ def _montar_base():
         data = (m.get("criado_em") or "")[:10]
         if not pid or not data:
             continue
+        if prod.get("ativo") is False:
+            continue  # produto inativo — fora da previsão (geral e por setor)
+        f = flags.get(pid, {})
+        if not (f.get("essencial") or f.get("reposicao_continua")):
+            continue  # entra só quem é insumo estratégico ou de reposição contínua
         qtd = float(m.get("quantidade_convertida") or 0)
         setor = m.get("setor_solicitante") or "Sem setor"
         item = {"data": data, "qtd": qtd}
@@ -136,13 +184,8 @@ def _montar_base():
         sp = setor_produto_map[setor].setdefault(pid, {"movs": []})
         sp["movs"].append(item)
 
-    entradas_map = defaultdict(list)
-    for e in entradas:
-        pid = e.get("produto_id")
-        data = (e.get("criado_em") or "")[:10]
-        if not pid or not data:
-            continue
-        entradas_map[pid].append({"data": data, "qtd": float(e.get("quantidade_convertida") or 0)})
+    for pid, p in produtos_map.items():
+        _reconstruir_valor_saidas(p["movs"], entradas_map.get(pid, []), p["info"].get("valor_unitario"))
 
     return {"produtos": produtos_map, "setores": dict(setor_movs),
             "setor_produto": dict(setor_produto_map), "entradas": dict(entradas_map)}
@@ -512,6 +555,9 @@ def _cobertura_media(produtos):
 def _fmt_data(d):
     return d.strftime("%d/%m/%Y") if d else "—"
 
+def _fmt_reais(v):
+    return f'R$ {v:,.2f}'.replace(",", "_").replace(".", ",").replace("_", ".")
+
 def _status_reposicao_setor(giro, hoje):
     """Situação de ressuprimento calculada só com o histórico do setor (giro/
     próxima reposição estimada), independente do ponto de pedido geral do item."""
@@ -686,6 +732,19 @@ def _tab_setor(base, produtos, lead_time):
         setor_sel = st.selectbox("Setor", setores_disponiveis, key="prev_setor_sel")
 
     movs_setor = base["setores"][setor_sel]
+    produtos_by_id = {p["id"]: p for p in produtos}
+    itens_setor = base["setor_produto"].get(setor_sel, {})
+
+    TODOS = "__todos__"
+    opcoes_ids = [TODOS] + [pid for pid in itens_setor if pid in produtos_by_id]
+    def _label_prod_filtro(pid):
+        return "Todos os produtos (R$)" if pid == TODOS else produtos_by_id[pid]["nome"]
+    prod_filtro = st.selectbox("Ver consumo de", opcoes_ids, format_func=_label_prod_filtro,
+                                key="prev_setor_produto_filtro")
+    st.caption("\"Todos os produtos\" soma o consumo em R\\$ (pelo custo médio ponderado reconstruído "
+               "das entradas) — evita somar litro com unidade com rolo como se fossem a mesma coisa. "
+               "Escolhendo um produto específico, o gráfico volta pra unidade física dele.")
+
     datas = sorted(datetime.date.fromisoformat(m["data"]) for m in movs_setor)
     with c2:
         intervalo = st.date_input("Período", value=(datas[0], datas[-1]),
@@ -695,9 +754,16 @@ def _tab_setor(base, produtos, lead_time):
     else:
         d_ini, d_fim = datas[0], datas[-1]
 
-    movs_filtrados = [m for m in movs_setor if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
-    taxa_setor, _expurgo_setor = _taxa_mensal_tendencia(movs_setor)
-    _grafico_setor(movs_filtrados, taxa_setor)
+    if prod_filtro == TODOS:
+        movs_calc = [{"data": m["data"], "qtd": m.get("valor", 0.0)} for m in movs_setor]
+        modo_valor, unidade_grafico = True, ""
+    else:
+        movs_calc = itens_setor[prod_filtro]["movs"]
+        modo_valor, unidade_grafico = False, produtos_by_id[prod_filtro]["unidade"]
+
+    movs_calc_filtrados = [m for m in movs_calc if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
+    taxa_setor, _expurgo_setor = _taxa_mensal_tendencia(movs_calc)
+    _grafico_setor(movs_calc_filtrados, taxa_setor, modo_valor, unidade_grafico)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="card" style="margin-top:1rem;">'
@@ -707,15 +773,15 @@ def _tab_setor(base, produtos, lead_time):
                "saída conta como reposição (não usam a tendência mensal do restante da "
                "previsão). Com só 1 saída registrada, a estimativa usa o lead time como "
                "calibração inicial e se ajusta sozinha a partir da 2ª saída.")
-    produtos_by_id = {p["id"]: p for p in produtos}
-    itens_setor = base["setor_produto"].get(setor_sel, {})
     hoje = datetime.date.today()
     linhas = ""
     for pid, sp in itens_setor.items():
         prod_geral = produtos_by_id.get(pid)
         if not prod_geral:
             continue
-        qtd_periodo = sum(m["qtd"] for m in sp["movs"] if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim)
+        movs_periodo = [m for m in sp["movs"] if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
+        qtd_periodo = sum(m["qtd"] for m in movs_periodo)
+        valor_periodo = sum(m.get("valor", 0.0) for m in movs_periodo)
         if qtd_periodo <= 0:
             continue
         # giro/média de reposição usam TODO o histórico do item nesse setor (não só o
@@ -735,6 +801,7 @@ def _tab_setor(base, produtos, lead_time):
             f'<td>{ultima_data_fmt}</td>'
             f'<td>{ultima_qtd_fmt}</td>'
             f'<td>{qtd_br(round(qtd_periodo))} {esc(prod_geral["unidade"])}</td>'
+            f'<td>{_fmt_reais(valor_periodo)}</td>'
             f'<td>{giro_fmt}</td>'
             f'<td>{media_reposicao_fmt}</td>'
             f'<td>{proxima_fmt}</td>'
@@ -744,6 +811,7 @@ def _tab_setor(base, produtos, lead_time):
         st.markdown(
             f'<table class="tbl"><thead><tr><th>Item</th><th>Última solicitação</th>'
             f'<th>Última qtd abastecida</th><th>Consumido no período</th>'
+            f'<th>Valor gasto no período</th>'
             f'<th>Giro (un/dia, setor)</th><th>Média de reposição (setor)</th>'
             f'<th>Próxima reposição estimada (setor)</th>'
             f'<th>Situação de ressuprimento (setor)</th></tr></thead>'
@@ -753,7 +821,21 @@ def _tab_setor(base, produtos, lead_time):
         st.info("Nenhum item com consumo no período selecionado.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-def _grafico_setor(movs_filtrados, taxa_setor):
+    itens_com_dados = [pid for pid, sp in itens_setor.items() if pid in produtos_by_id
+                        and any(d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim for m in sp["movs"])]
+    if itens_com_dados:
+        st.markdown('<div class="card" style="margin-top:1rem;">'
+                     '<div class="card-h">Curva de consumo × valor gasto por item</div>', unsafe_allow_html=True)
+        st.caption("Valor gasto pelo custo médio ponderado (CMP) reconstruído a partir das entradas com "
+                   "custo unitário informado. Sem nenhuma entrada valorizada ainda no histórico do item, "
+                   "usa o valor unitário cadastrado no produto como estimativa provisória.")
+        pid_curva = st.selectbox("Item", itens_com_dados,
+                                  format_func=lambda pid: produtos_by_id[pid]["nome"],
+                                  key="prev_setor_item_curva")
+        _grafico_item_setor(itens_setor[pid_curva]["movs"], produtos_by_id[pid_curva]["unidade"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+def _grafico_setor(movs_filtrados, taxa_setor, modo_valor=False, unidade=""):
     hist_por_mes = defaultdict(float)
     for m in movs_filtrados:
         d = datetime.date.fromisoformat(m["data"])
@@ -767,6 +849,7 @@ def _grafico_setor(movs_filtrados, taxa_setor):
     fc_y = [f["valor"] for f in forecast]
 
     ordem_x = hist_x + [x for x in fc_x if x not in hist_x]
+    titulo_eixo = "Consumo mensal (R$)" if modo_valor else f"Consumo mensal ({unidade})" if unidade else "Consumo mensal"
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=hist_x, y=hist_y, name="Consumo real", marker_color="rgba(204,0,0,.55)"))
@@ -774,7 +857,32 @@ def _grafico_setor(movs_filtrados, taxa_setor):
                               line=dict(color="#F2C94C", width=2.5)))
     fig.update_layout(**_PL, height=320, legend=dict(bgcolor="rgba(0,0,0,0)"),
                        xaxis=dict(type="category", categoryorder="array", categoryarray=ordem_x),
-                       yaxis=dict(title="Consumo mensal", gridcolor="rgba(0,0,0,.05)"))
+                       yaxis=dict(title=titulo_eixo, gridcolor="rgba(0,0,0,.05)"))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _grafico_item_setor(movs, unidade):
+    """Curva dupla de um item só: consumo em unidade física (barras) x valor
+    gasto em R$ pelo CMP reconstruído (linha, eixo secundário)."""
+    hist_qtd, hist_valor = defaultdict(float), defaultdict(float)
+    for m in movs:
+        d = datetime.date.fromisoformat(m["data"])
+        chave = (d.year, d.month)
+        hist_qtd[chave] += m["qtd"]
+        hist_valor[chave] += m.get("valor", 0.0)
+    chaves = sorted(hist_qtd.keys())
+    x = [f'{_NOMES_MES[mes]}/{str(ano)[2:]}' for (ano, mes) in chaves]
+    y_qtd = [hist_qtd[k] for k in chaves]
+    y_valor = [hist_valor[k] for k in chaves]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=y_qtd, name=f"Consumo ({unidade})", marker_color="rgba(204,0,0,.5)"))
+    fig.add_trace(go.Scatter(x=x, y=y_valor, name="Valor gasto (R$)", mode="lines+markers",
+                              line=dict(color="#F2C94C", width=2.5), yaxis="y2"))
+    fig.update_layout(**_PL, height=300, legend=dict(bgcolor="rgba(0,0,0,0)"),
+                       xaxis=dict(type="category", categoryorder="array", categoryarray=x),
+                       yaxis=dict(title=f"Consumo ({unidade})", gridcolor="rgba(0,0,0,.05)"),
+                       yaxis2=dict(title="Valor gasto (R$)", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)"))
     st.plotly_chart(fig, use_container_width=True)
 
 
