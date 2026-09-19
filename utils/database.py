@@ -386,7 +386,8 @@ def stats_dashboard() -> dict:
         saidas_ok=sb.table("movimentacoes").select("setor_solicitante,quantidade_convertida").eq("tipo","saida").eq("status","concluido").execute().data or []
         consumo={}
         for s in saidas_ok:
-            k=s.get("setor_solicitante") or "Sem setor"
+            k=s.get("setor_solicitante")
+            if not k: continue  # nunca inclui consumo "sem setor" no gráfico — distorce a leitura por setor
             consumo[k]=consumo.get(k,0)+float(s.get("quantidade_convertida") or 0)
         from datetime import datetime,timedelta
         lim=(datetime.utcnow()-timedelta(days=30)).isoformat()
