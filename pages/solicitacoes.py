@@ -52,6 +52,30 @@ def _badge_status_compra(status: str) -> str:
             f'{emoji} {esc(status)}</span>')
 
 
+# ── Popups flutuantes (modal real) ────────────────────────────────────────────
+
+_dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+
+
+@_dialog("⚠️ Atenção")
+def _dialog_avisos(mensagens: list):
+    for m in mensagens:
+        st.error(m)
+    if st.button("Fechar", type="primary", use_container_width=True, key="dlg_aviso_fechar"):
+        st.rerun()
+
+
+@_dialog("🖼️ Foto do Produto")
+def _dialog_foto(nome: str, foto_url: str):
+    st.markdown(f"**{esc(nome)}**")
+    if foto_url:
+        st.image(foto_url, use_container_width=True)
+    else:
+        st.info("Sem foto cadastrada para este produto.")
+    if st.button("Fechar", type="primary", use_container_width=True, key="dlg_foto_fechar"):
+        st.rerun()
+
+
 # ══ TELA USUÁRIO ════════════════════════════════════════════════════════════════
 
 def tela_solicitacoes_usuario():
@@ -161,12 +185,41 @@ def tela_solicitacoes_admin():
 
 # ── Form: Solicitação ao Almoxarifado ────────────────────────────────────────
 
+_N_LINHAS_SOL = 10
+_SOL_NENHUM   = "— selecionar produto —"
+_SETOR_VAZIO  = "— selecione o setor —"
+
+
+def _limpar_estado_solicitar():
+    for i in range(_N_LINHAS_SOL):
+        st.session_state.pop(f"sol_p{i}", None)
+        st.session_state.pop(f"sol_q{i}", None)
+    st.session_state.pop("sol_setor", None)
+    st.session_state.pop("sol_nome", None)
+    st.session_state.pop("sol_obs", None)
+
+
 def _form_solicitar(u):
     if st.session_state.get("sol_enviada_ok"):
-        st.success("📨 **Solicitação Enviada.** O retorno de aprovação será dado no seu aplicativo.")
+        info = st.session_state["sol_enviada_ok"]
+        linhas_itens = "".join(
+            f'<div style="font-size:.8rem;color:var(--t3);">↳ {esc(it["nome"])}: '
+            f'<strong>{qtd_br(it["qtd"])} {sigla_para_opcao(it["un"])}</strong></div>'
+            for it in info["itens"]
+        )
+        st.markdown(
+            f'<div style="background:var(--ok-bg);border:2px solid rgba(22,163,74,.3);'
+            f'border-radius:12px;padding:2rem;text-align:center;margin:1rem 0;">'
+            f'<div style="font-size:2.5rem;margin-bottom:.5rem;">📨</div>'
+            f'<div style="font-size:1.2rem;font-weight:700;color:var(--ok);margin-bottom:.5rem;">Solicitação Enviada!</div>'
+            f'<div style="font-size:.85rem;color:var(--t2);margin-bottom:.4rem;">Setor: <strong>{esc(info["setor"])}</strong></div>'
+            f'{linhas_itens}'
+            f'<div style="font-size:.8rem;color:var(--t3);margin-top:.4rem;">'
+            f'O retorno de aprovação será dado no seu aplicativo.</div></div>',
+            unsafe_allow_html=True)
         if st.button("➕ Nova Solicitação ao Almoxarifado", type="primary"):
             del st.session_state["sol_enviada_ok"]
-            st.session_state.pop("sol_prod_sel", None)
+            _limpar_estado_solicitar()
             st.rerun()
         return
 
@@ -176,79 +229,96 @@ def _form_solicitar(u):
         st.warning("Nenhum produto cadastrado.")
         return
 
-    pm = {p["nome"]: p for p in prods}
-    sn = [s["nome"] for s in sets] or ["Sem setor"]
+    pm = {f"{p['nome']} ({p['codigo_interno']})": p for p in prods}
+    # Setor sempre começa vazio -> obriga o usuário a escolher o setor certo,
+    # em vez de vir pré-selecionado no primeiro item da lista.
+    sn = [_SETOR_VAZIO] + [s["nome"] for s in sets] if sets else ["Sem setor"]
 
     st.markdown('<div class="card"><div class="card-h">📝 Solicitação ao Almoxarifado</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="font-size:.78rem;color:var(--t3);margin-bottom:.6rem;">'
+        f'Selecione seu setor e escolha até {_N_LINHAS_SOL} produtos com suas respectivas quantidades.</div>',
+        unsafe_allow_html=True)
+
     c1, c2 = st.columns(2)
     with c1:
-        prod_nome = st.selectbox("Produto *", list(pm.keys()), key="sol_prod_sel")
-        prod      = pm[prod_nome]
-        un_sec    = prod.get("unidade_secundaria", "UN")
-        un_lbl    = sigla_para_opcao(un_sec)
-        disp      = estoque_disponivel(prod["id"])
-        bruto     = float(prod.get("quantidade_total_secundaria", 0))
-        reservado = max(0.0, bruto - disp)
-        cor_est   = "var(--ok)" if disp > 0 else "var(--err)"
-        linha_reservado = (
-            f'🔒 Reservado (aguardando retirada): <strong style="color:var(--warn);">{qtd_br(reservado)} {un_lbl}</strong><br>'
-            if reservado > 0 else ""
-        )
-        st.markdown(
-            f'<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;'
-            f'padding:.55rem .9rem;font-size:.82rem;margin:.4rem 0;line-height:1.7;">'
-            f'📦 Estoque total: <strong>{qtd_br(bruto)} {un_lbl}</strong><br>'
-            f'{linha_reservado}'
-            f'✅ Saldo disponível para solicitar: <strong style="color:{cor_est};">{qtd_br(disp)} {un_lbl}</strong>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        if disp > 0:
-            qtd = st.number_input(
-                f"Quantidade * ({un_lbl})",
-                min_value=0.001, max_value=float(disp), value=min(1.0, float(disp)),
-                step=1.0, key="sol_qtd",
-            )
-        else:
-            st.number_input(
-                f"Quantidade * ({un_lbl})",
-                min_value=0.0, max_value=0.0, value=0.0, step=1.0,
-                key="sol_qtd", disabled=True,
-            )
-            qtd = 0.0
-            st.warning("⚠️ Sem saldo disponível para este produto agora (tudo já reservado ou esgotado).")
+        setor = st.selectbox("Setor *", sn, key="sol_setor")
     with c2:
-        setor  = st.selectbox("Setor *", sn, key="sol_setor")
         nome_s = st.text_input("Nome do solicitante *", value=u.get("nome") or u.get("nick", ""), key="sol_nome")
-        obs    = st.text_area("Observação (opcional)", height=68, key="sol_obs")
+    obs = st.text_area("Observação (opcional)", height=68, key="sol_obs")
+
+    st.markdown(
+        '<div style="font-size:.78rem;font-weight:700;color:var(--t3);'
+        'letter-spacing:.05em;text-transform:uppercase;margin:.8rem 0 .2rem;">Itens</div>',
+        unsafe_allow_html=True)
+    _ch1, _ch2, _ch3 = st.columns([3, 1, 0.6])
+    with _ch1: st.markdown('<div style="font-size:.75rem;color:var(--t3);padding-bottom:.1rem;">Produto</div>', unsafe_allow_html=True)
+    with _ch2: st.markdown('<div style="font-size:.75rem;color:var(--t3);padding-bottom:.1rem;">Qtd (unidade secundária)</div>', unsafe_allow_html=True)
+    with _ch3: st.markdown('<div style="font-size:.75rem;color:var(--t3);padding-bottom:.1rem;">Foto</div>', unsafe_allow_html=True)
+
+    opts_prod = [_SOL_NENHUM] + list(pm.keys())
+    linhas = []
+    for i in range(_N_LINHAS_SOL):
+        c_p, c_q, c_f = st.columns([3, 1, 0.6])
+        with c_p:
+            p_sel = st.selectbox(f"Produto {i+1}", opts_prod, key=f"sol_p{i}", label_visibility="collapsed")
+        with c_q:
+            q_sel = st.number_input("Qtd", min_value=0.0, value=0.0, step=1.0, key=f"sol_q{i}", label_visibility="collapsed")
+        with c_f:
+            prod_linha = pm.get(p_sel)
+            tem_foto = bool(prod_linha and prod_linha.get("foto_url"))
+            if st.button("📷", key=f"sol_foto_{i}", disabled=not tem_foto, use_container_width=True,
+                         help="Ver foto do produto" if tem_foto else "Sem foto cadastrada"):
+                _dialog_foto(prod_linha["nome"], prod_linha["foto_url"])
+        linhas.append((p_sel, q_sel))
 
     if st.button("📨 Enviar Solicitação →", type="primary", use_container_width=True, key="btn_enviar_sol"):
+        agregados = {}
+        for p_sel, q_sel in linhas:
+            if p_sel != _SOL_NENHUM and q_sel > 0:
+                prod = pm[p_sel]
+                agr = agregados.setdefault(prod["id"], {"prod": prod, "qtd": 0.0})
+                agr["qtd"] += q_sel
+
+        erros = []
+        if setor == _SETOR_VAZIO:
+            erros.append("Selecione o setor.")
         if not nome_s.strip():
-            st.error("Nome obrigatório.")
-        elif qtd <= 0:
-            st.error("Não há saldo disponível para solicitar este produto.")
+            erros.append("Nome obrigatório.")
+        if not agregados:
+            erros.append("Informe pelo menos um produto com quantidade maior que zero.")
+        for agr in agregados.values():
+            disp = estoque_disponivel(agr["prod"]["id"])  # revalida na hora do envio p/ evitar corrida entre usuários simultâneos
+            if disp < agr["qtd"]:
+                un_lbl = sigla_para_opcao(agr["prod"].get("unidade_secundaria", "UN"))
+                erros.append(f"Saldo insuficiente para {agr['prod']['nome']}. Disponível: {qtd_br(disp)} {un_lbl}.")
+
+        if erros:
+            _dialog_avisos(erros)
         else:
-            disp_agora = estoque_disponivel(prod["id"])  # revalida na hora do envio p/ evitar corrida entre usuários simultâneos
-            if qtd > disp_agora:
-                st.error(f"❌ Saldo insuficiente. Disponível agora: {qtd_br(disp_agora)} {un_lbl}. A tela será atualizada — tente novamente.")
-                st.rerun()
-            else:
+            for agr in agregados.values():
+                prod = agr["prod"]
+                un_sec = prod.get("unidade_secundaria", "UN")
                 registrar_movimentacao({
                     "produto_id":            prod["id"],
                     "tipo":                  "saida",
                     "tipo_saida":            "SOLICITADA",
                     "status":                "pendente",
-                    "quantidade_informada":  qtd,
+                    "quantidade_informada":  agr["qtd"],
                     "unidade_informada":     un_sec,
-                    "quantidade_convertida": qtd,
+                    "quantidade_convertida": agr["qtd"],
                     "setor_solicitante":     setor,
                     "nome_solicitante":      nome_s.strip(),
                     "nick_solicitante":      u["nick"],
                     "observacao":            obs.strip() or None,
                     "usuario_solicitante":   u["id"],
                 })
-                st.session_state["sol_enviada_ok"] = True
-                st.rerun()
+            st.session_state["sol_enviada_ok"] = {
+                "setor": setor,
+                "itens": [{"nome": agr["prod"]["nome"], "qtd": agr["qtd"], "un": agr["prod"].get("unidade_secundaria", "UN")}
+                          for agr in agregados.values()],
+            }
+            st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -847,8 +917,6 @@ def _reverter_solicitacao(item_id, tipo: str) -> bool:
 
 
 # ── Popup (modal real) de confirmação de reversão ─────────────────────────────
-
-_dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
 
 
 @_dialog("↩️ Reverter Solicitação")
