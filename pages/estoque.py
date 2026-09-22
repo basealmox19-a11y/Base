@@ -3,7 +3,7 @@ import streamlit as st, datetime, io
 import pandas as pd
 import plotly.graph_objects as go
 from utils.database import (listar_produtos, listar_categorias, atualizar_produto,
-    registrar_movimentacao, listar_movimentacoes, historico_produto, listar_solicitacoes)
+    registrar_movimentacao, listar_movimentacoes, historico_produto, listar_solicitacoes, listar_setores)
 from utils.database import mesclar_classificacoes, definir_classificacao_produto  # classificação manual (produto_flags)
 from utils.auth import sessao, is_admin, is_almoxarife
 from utils.ui import badge, status_estoque
@@ -340,16 +340,23 @@ def _hist_modal(prod):
     st.plotly_chart(fig,use_container_width=True)
     st.markdown(f'<div style="font-size:{FS_HEAD};font-weight:700;color:var(--t3);letter-spacing:.06em;text-transform:uppercase;margin:.8rem 0 .4rem;">Detalhamento</div>',unsafe_allow_html=True)
 
-    # --- Filtros por coluna (mesmo padrão de Solicitações / Histórico de Ajustes) ---
+    # --- Filtros por coluna (multi-seleção) — usa a MESMA st.columns(head_ratio_hist) para
+    # filtros, cabeçalho e cada linha da tabela abaixo, garantindo alinhamento exato com a coluna. ---
     head_ratio_hist=[1.3,1.0,1.15,1.1,1.1,1.0,1.15]
+
+    op_subtipo=sorted({str(m.get("tipo_entrada") or m.get("tipo_saida") or "—") for m in movs})
+    op_setor=sorted({s["nome"] for s in listar_setores(apenas_ativos=False) if s.get("nome")})
+    op_nf=sorted({m["numero_nf"] for m in movs if m.get("numero_nf")})
+    op_resp=sorted({r for r in ((m.get("exe") or {}).get("nick") or (m.get("sol") or {}).get("nick") or "" for m in movs) if r})
+
     fc=st.columns(head_ratio_hist)
     with fc[0]: f_data=st.date_input("Data",value=(),key="hist_f_data",label_visibility="collapsed")
-    with fc[1]: f_tipo=st.selectbox("Tipo",["Todos","Entrada","Saída"],key="hist_f_tipo",label_visibility="collapsed")
-    with fc[2]: f_subtipo=st.text_input("Subtipo",placeholder="🔍 Subtipo…",key="hist_f_subtipo",label_visibility="collapsed")
+    with fc[1]: f_tipo=st.multiselect("Tipo",["Entrada","Saída"],key="hist_f_tipo",label_visibility="collapsed",placeholder="Todos")
+    with fc[2]: f_subtipo=st.multiselect("Subtipo",op_subtipo,key="hist_f_subtipo",label_visibility="collapsed",placeholder="Todos")
     with fc[3]: f_qtd_min=st.number_input("Qtd mín.",min_value=0.0,value=0.0,step=1.0,key="hist_f_qtd_min",label_visibility="collapsed")
-    with fc[4]: f_setor=st.text_input("Setor",placeholder="🔍 Setor…",key="hist_f_setor",label_visibility="collapsed")
-    with fc[5]: f_nf=st.text_input("NF",placeholder="🔍 NF…",key="hist_f_nf",label_visibility="collapsed")
-    with fc[6]: f_resp=st.text_input("Responsável",placeholder="🔍 Responsável…",key="hist_f_resp",label_visibility="collapsed")
+    with fc[4]: f_setor=st.multiselect("Setor",op_setor,key="hist_f_setor",label_visibility="collapsed",placeholder="Todos")
+    with fc[5]: f_nf=st.multiselect("NF",op_nf,key="hist_f_nf",label_visibility="collapsed",placeholder="Todas")
+    with fc[6]: f_resp=st.multiselect("Responsável",op_resp,key="hist_f_resp",label_visibility="collapsed",placeholder="Todos")
 
     hc=st.columns(head_ratio_hist)
     for col,txt in zip(hc,["Data/Hora","Tipo","Subtipo","Quantidade","Setor","NF","Responsável"]):
@@ -360,31 +367,37 @@ def _hist_modal(prod):
             d0,d1=f_data
             dm=datetime.datetime.fromisoformat(m["criado_em"].replace("Z","+00:00")).date()
             if not (d0<=dm<=d1): return False
-        tipo_m=m.get("tipo","")
-        if f_tipo!="Todos" and ((f_tipo=="Entrada")!=(tipo_m=="entrada")): return False
+        tipo_m="Entrada" if m.get("tipo")=="entrada" else "Saída"
+        if f_tipo and tipo_m not in f_tipo: return False
         subtipo_m=str(m.get("tipo_entrada") or m.get("tipo_saida") or "—")
-        if f_subtipo.strip() and f_subtipo.strip().lower() not in subtipo_m.lower(): return False
+        if f_subtipo and subtipo_m not in f_subtipo: return False
         if f_qtd_min>0 and float(m.get("quantidade_convertida") or 0)<f_qtd_min: return False
-        if f_setor.strip() and f_setor.strip().lower() not in (m.get("setor_solicitante") or "").lower(): return False
-        if f_nf.strip() and f_nf.strip().lower() not in (m.get("numero_nf") or "").lower(): return False
+        if f_setor and (m.get("setor_solicitante") or "—") not in f_setor: return False
+        if f_nf and (m.get("numero_nf") or "—") not in f_nf: return False
         exe_m=(m.get("exe") or {}).get("nick",""); sol_m=(m.get("sol") or {}).get("nick","")
         resp_m=exe_m if exe_m else sol_m
-        if f_resp.strip() and f_resp.strip().lower() not in resp_m.lower(): return False
+        if f_resp and resp_m not in f_resp: return False
         return True
 
     movs_tabela=[m for m in reversed(movs) if _passa_mov(m)]
 
-    rows=""
-    for m in movs_tabela:
-        tipo=m.get("tipo",""); cor="var(--ok)" if tipo=="entrada" else "var(--err)"
-        sinal="+"; tipo_lbl="📥 Entrada" if tipo=="entrada" else "📤 Saída"
-        if tipo!="entrada": sinal="-"
-        un_lbl=sigla_para_opcao(m.get("unidade_informada","UN"))
-        exe=(m.get("exe") or {}).get("nick",""); sol=(m.get("sol") or {}).get("nick","")
-        resp=exe if exe else sol; subtipo=m.get("tipo_entrada") or m.get("tipo_saida") or "—"
-        rows+=f'<tr><td style="color:var(--t3);font-size:{FS_SUB};">{datahora_br(m["criado_em"])}</td><td style="font-size:{FS_BODY};"><strong style="color:{cor};">{tipo_lbl}</strong></td><td style="color:var(--t3);font-size:{FS_SUB};">{subtipo}</td><td style="color:{cor};font-weight:700;font-family:var(--mono);font-size:{FS_BODY};">{sinal}{qtd_br(m["quantidade_convertida"])} {un_lbl}</td><td style="font-size:{FS_SUB};">{m.get("setor_solicitante") or "—"}</td><td style="color:var(--t3);font-size:{FS_SUB};">{m.get("numero_nf") or "—"}</td><td style="color:var(--t3);font-size:{FS_SUB};">{resp}</td></tr>'
-    if rows:
-        st.markdown(f'<table class="tbl"><thead><tr><th>Data/Hora</th><th>Tipo</th><th>Subtipo</th><th>Quantidade</th><th>Setor</th><th>NF</th><th>Responsável</th></tr></thead><tbody>{rows}</tbody></table>',unsafe_allow_html=True)
+    if movs_tabela:
+        for m in movs_tabela:
+            tipo=m.get("tipo",""); cor="var(--ok)" if tipo=="entrada" else "var(--err)"
+            sinal="+"; tipo_lbl="📥 Entrada" if tipo=="entrada" else "📤 Saída"
+            if tipo!="entrada": sinal="-"
+            un_lbl=sigla_para_opcao(m.get("unidade_informada","UN"))
+            exe=(m.get("exe") or {}).get("nick",""); sol=(m.get("sol") or {}).get("nick","")
+            resp=exe if exe else sol; subtipo=m.get("tipo_entrada") or m.get("tipo_saida") or "—"
+            rc=st.columns(head_ratio_hist)
+            rc[0].markdown(f'<span style="color:var(--t3);font-size:{FS_SUB};">{datahora_br(m["criado_em"])}</span>',unsafe_allow_html=True)
+            rc[1].markdown(f'<span style="font-size:{FS_BODY};"><strong style="color:{cor};">{tipo_lbl}</strong></span>',unsafe_allow_html=True)
+            rc[2].markdown(f'<span style="color:var(--t3);font-size:{FS_SUB};">{esc(subtipo)}</span>',unsafe_allow_html=True)
+            rc[3].markdown(f'<span style="color:{cor};font-weight:700;font-family:var(--mono);font-size:{FS_BODY};">{sinal}{qtd_br(m["quantidade_convertida"])} {un_lbl}</span>',unsafe_allow_html=True)
+            rc[4].markdown(f'<span style="font-size:{FS_SUB};">{esc(m.get("setor_solicitante") or "—")}</span>',unsafe_allow_html=True)
+            rc[5].markdown(f'<span style="color:var(--t3);font-size:{FS_SUB};">{esc(m.get("numero_nf") or "—")}</span>',unsafe_allow_html=True)
+            rc[6].markdown(f'<span style="color:var(--t3);font-size:{FS_SUB};">{esc(resp or "—")}</span>',unsafe_allow_html=True)
+            st.markdown('<hr style="margin:.3rem 0;border:none;border-top:1px solid var(--bdr);">',unsafe_allow_html=True)
     else:
         st.markdown(f'<div style="text-align:center;color:var(--t3);font-size:{FS_SUB};padding:1.5rem;">Nenhum resultado com esses filtros.</div>',unsafe_allow_html=True)
     st.markdown("</div>",unsafe_allow_html=True)
