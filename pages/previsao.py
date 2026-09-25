@@ -178,7 +178,7 @@ def _montar_base():
         qtd = float(m.get("quantidade_convertida") or 0)
         setor = m.get("setor_solicitante") or "Sem setor"
         item = {"data": data, "qtd": qtd}
-        p = produtos_map.setdefault(pid, {"info": prod, "movs": []})
+        p = produtos_map.setdefault(pid, {"info": prod, "movs": [], "flags": f})
         p["movs"].append(item)
         setor_movs[setor].append(item)
         sp = setor_produto_map[setor].setdefault(pid, {"movs": []})
@@ -372,6 +372,26 @@ def _simular(estoque_atual, taxa_dia_util_pleno, lead_time, dias_seg, estoque_mi
             "data_pedido": data_pedido, "data_ruptura": data_ruptura,
             "dias_atraso_pedido": dias_atraso_pedido, "quantidade_comprar": quantidade_comprar}
 
+def _data_cobertura_compra(estoque_pos_compra, taxa_dia_util_pleno):
+    """Simula o consumo dia a dia a partir de hoje sobre o saldo JÁ somado à
+    quantidade sugerida de compra (arredondada pra cima na unidade primária —
+    ou seja, o volume real que entraria no estoque) e retorna a data em que
+    esse saldo se esgotaria, usando a mesma taxa/sazonalidade da previsão.
+    Retorna None se não há taxa de consumo, não há saldo pós-compra, ou o
+    saldo não se esgota dentro do horizonte de simulação."""
+    if taxa_dia_util_pleno <= 0 or estoque_pos_compra <= 0:
+        return None
+    hoje = datetime.date.today()
+    saldo = estoque_pos_compra
+    for i in range(1, HORIZONTE_SIMULACAO_DIAS + 1):
+        dia = hoje + datetime.timedelta(days=i)
+        consumo = _consumo_dia(taxa_dia_util_pleno, dia)
+        anterior = saldo
+        saldo = max(saldo - consumo, 0.0)
+        if anterior > 0 and saldo <= 0:
+            return dia
+    return None
+
 def _forecast_mensal(taxa_dia_util_pleno):
     """Mês em vigor (parcial, do dia seguinte até o fim do mês) + 12 meses completos."""
     if taxa_dia_util_pleno <= 0:
@@ -403,7 +423,7 @@ def _forecast_mensal(taxa_dia_util_pleno):
 def _calcular_previsao_produtos(base, lead_time, dias_seg):
     out = []
     for pid, p in base["produtos"].items():
-        info, movs = p["info"], p["movs"]
+        info, movs, flags = p["info"], p["movs"], p.get("flags", {})
         taxa, expurgo = _taxa_mensal_tendencia(movs)
         estoque_atual = float(info.get("quantidade_total_secundaria") or 0)
         fator = float(info.get("fator_conversao") or 1) or 1.0
@@ -413,11 +433,18 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
         qtd_comprar_sec = sim["quantidade_comprar"] or 0.0
         # arredonda pra cima: não dá pra comprar fração da unidade primária (caixa, fardo, etc.)
         qtd_comprar_prim = math.ceil(qtd_comprar_sec / fator - 1e-9) if qtd_comprar_sec > 0 else 0
+        # até quando a compra sugerida (já arredondada pra unidade primária) cobriria o consumo
+        data_cobertura = None
+        if qtd_comprar_prim > 0:
+            estoque_pos_compra = estoque_atual + (qtd_comprar_prim * fator)
+            data_cobertura = _data_cobertura_compra(estoque_pos_compra, taxa)
         out.append({
             "id": pid, "nome": info.get("nome", "—"), "codigo": info.get("codigo_interno", "—"),
             "unidade": info.get("unidade_secundaria", "UN"),
             "unidade_primaria": info.get("unidade_primaria", "UN"), "fator_conversao": fator,
             "categoria": _extrair_categoria(info),
+            "essencial": bool(flags.get("essencial")),
+            "reposicao_continua": bool(flags.get("reposicao_continua")),
             "estoque_atual": estoque_atual, "consumo_diario": taxa, "movs": movs, "expurgo": expurgo,
             "forecast_mensal": _forecast_mensal(taxa),
             "previsao_30d": sim["previsao_30d"], "ponto_pedido_qtd": sim["ponto_pedido_qtd"],
@@ -425,6 +452,7 @@ def _calcular_previsao_produtos(base, lead_time, dias_seg):
             "dias_atraso_pedido": sim["dias_atraso_pedido"],
             "quantidade_comprar_secundaria": qtd_comprar_sec,
             "quantidade_comprar_primaria": qtd_comprar_prim,
+            "data_cobertura_compra": data_cobertura,
         })
     out.sort(key=lambda i: (i["data_pedido"] is None, i["data_pedido"] or datetime.date.max))
     return out
@@ -590,12 +618,30 @@ def _kpis(produtos, base, lead_time):
         f'</div>', unsafe_allow_html=True)
 
 
-# ── Aba Por produto — com filtro de categoria ─────────────────────
+# ── Aba Por produto — filtro de classificação + categoria ─────────
 def _tab_produto(produtos):
     st.markdown('<div class="card"><div class="card-h">Previsão por produto (SKU)</div>', unsafe_allow_html=True)
-    categorias = ["Todas"] + sorted({p["categoria"] for p in produtos})
+
+    # Filtro de classificação do insumo (acima dos filtros da tabela em si) —
+    # essencial = insumo estratégico, reposicao_continua = reposição contínua.
+    # Um produto pode ter as duas flags; "Todos" mantém a união (mesmo
+    # critério de entrada na base, em _montar_base).
+    class_sel = st.selectbox(
+        "Classificação do insumo",
+        ["Todos", "Somente insumos estratégicos", "Somente reposição contínua"],
+        key="prev_class_sel")
+    if class_sel == "Somente insumos estratégicos":
+        produtos_classe = [p for p in produtos if p["essencial"]]
+    elif class_sel == "Somente reposição contínua":
+        produtos_classe = [p for p in produtos if p["reposicao_continua"]]
+    else:
+        produtos_classe = produtos
+
+    categorias = ["Todas"] + sorted({p["categoria"] for p in produtos_classe})
+    if st.session_state.get("prev_cat_sel") not in categorias:
+        st.session_state["prev_cat_sel"] = "Todas"  # categoria pode não existir mais após trocar a classificação
     cat_sel = st.selectbox("Categoria", categorias, key="prev_cat_sel")
-    produtos_f = produtos if cat_sel == "Todas" else [p for p in produtos if p["categoria"] == cat_sel]
+    produtos_f = produtos_classe if cat_sel == "Todas" else [p for p in produtos_classe if p["categoria"] == cat_sel]
 
     def _celula_base(p):
         exp = p["expurgo"]
@@ -616,9 +662,17 @@ def _tab_produto(produtos):
             return "—"
         return f'{qtd_br(p["quantidade_comprar_primaria"])} {esc(p["unidade_primaria"])}'
 
+    def _celula_classificacao(p):
+        tags = []
+        if p["essencial"]:
+            tags.append('<span style="color:var(--warn);">🎯 Estratégico</span>')
+        if p["reposicao_continua"]:
+            tags.append('<span style="color:var(--t2);">🔄 Reposição contínua</span>')
+        return " · ".join(tags) if tags else "—"
+
     # --- Paginação (mesmo padrão de pages/estoque.py) ---
     OPCOES_PP = [10, 20, 40]
-    filtro_sig = f"{cat_sel}"
+    filtro_sig = f"{class_sel}|{cat_sel}"
     if st.session_state.get("prev_filtro_sig") != filtro_sig:
         st.session_state["prev_filtro_sig"] = filtro_sig
         st.session_state["prev_pagina"] = 1
@@ -641,19 +695,21 @@ def _tab_produto(produtos):
 
     rows = "".join(
         f'<tr><td><strong>{esc(p["nome"])}</strong><br>'
-        f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span></td>'
+        f'<span style="color:var(--t3);font-size:.72rem;">{esc(p["codigo"])} · {esc(p["categoria"])}</span><br>'
+        f'<span style="font-size:.72rem;">{_celula_classificacao(p)}</span></td>'
         f'<td>{qtd_br(round(p["estoque_atual"]))} {esc(p["unidade"])}</td>'
         f'<td>{qtd_br(round(p["previsao_30d"])) if p["previsao_30d"] is not None else "—"}</td>'
         f'<td style="color:var(--err);font-weight:700;">{_celula_pedido(p)}</td>'
         f'<td>{_fmt_data(p["data_ruptura"])}</td>'
         f'<td style="font-weight:600;">{_celula_comprar(p)}</td>'
+        f'<td>{_fmt_data(p["data_cobertura_compra"])}</td>'
         f'<td style="color:var(--t3);font-size:.75rem;">{_celula_base(p)}</td></tr>'
         for p in produtos_pag)
-    vz = '<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
+    vz = '<tr><td colspan="8" style="text-align:center;color:var(--t3);padding:2rem;">Nenhum resultado</td></tr>'
     st.markdown(
         f'<table class="tbl"><thead><tr><th>Produto</th><th>Estoque atual</th>'
         f'<th>Previsão 30 dias</th><th>Ponto de Pedido</th><th>Ruptura Prevista</th>'
-        f'<th>Comprar agora</th><th>Base do cálculo</th></tr></thead>'
+        f'<th>Comprar agora</th><th>Compra cobre até</th><th>Base do cálculo</th></tr></thead>'
         f'<tbody>{rows or vz}</tbody></table>', unsafe_allow_html=True)
 
     if produtos_f and total_paginas > 1:
