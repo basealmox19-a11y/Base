@@ -510,9 +510,10 @@ def _ajuste():
             st.error("Motivo obrigatório.")
         else:
             da=abs(diff); direcao="entrada" if diff>=0 else "saida"
-            # tipo_saida=None garante que este ajuste NUNCA seja contabilizado como consumo:
-            # as queries de consumo (dashboard, previsão de demanda) filtram por
-            # tipo_saida="SOLICITADA" ou tipo_saida="MANUAL" — ajustes ficam de fora automaticamente.
+            # tipo_saida=None continua identificando isto como um AJUSTE (correção de
+            # inventário, não uma solicitação/saída formal) — mas a Previsão de Demanda
+            # agora conta toda baixa de estoque como consumo, incluindo a de ajuste
+            # manual, então uma saída registrada aqui também entra na previsão do item.
             registrar_movimentacao({
                 "produto_id":            prod["id"],
                 "tipo":                  direcao,          # necessário para o trigger de estoque
