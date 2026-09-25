@@ -63,7 +63,7 @@ _PL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
 FATOR_SAZONAL_BF = 0.15                    # crescimento estimado de mercado p/ Out-Dez (ponderado 2023-2025, sem 2022)
 PESO_SAZONAL_MES = {10: 0.40, 11: 1.00, 12: 0.60}   # Out = rampa, Nov = pico, Dez = resíduo BF + Natal
 DIAS_HISTORICO = 3650                      # sem corte prático — usa todo o histórico já registrado
-DIAS_SEGURANCA_PADRAO = 7
+DIAS_SEGURANCA_PADRAO = 5
 LEAD_TIME_PADRAO_DIAS = 10                 # também é o prazo usado na medição de nível de serviço
 HORIZONTE_SIMULACAO_DIAS = 400
 MESES_PROJECAO_FUTUROS = 12
@@ -173,8 +173,11 @@ def _montar_base():
         if prod.get("ativo") is False:
             continue  # produto inativo — fora da previsão (geral e por setor)
         f = flags.get(pid, {})
-        if not (f.get("essencial") or f.get("reposicao_continua")):
-            continue  # entra só quem é insumo estratégico ou de reposição contínua
+        # Todo produto ATIVO com saída registrada entra na base — as flags
+        # "essencial"/"reposicao_continua" deixaram de ser critério de exclusão
+        # daqui (isso escondia o consumo já registrado de produtos sem
+        # classificação manual) e agora servem só para tag/filtro na tela
+        # "Por produto" (ver _tab_produto).
         qtd = float(m.get("quantidade_convertida") or 0)
         setor = m.get("setor_solicitante") or "Sem setor"
         item = {"data": data, "qtd": qtd}
@@ -624,8 +627,9 @@ def _tab_produto(produtos):
 
     # Filtro de classificação do insumo (acima dos filtros da tabela em si) —
     # essencial = insumo estratégico, reposicao_continua = reposição contínua.
-    # Um produto pode ter as duas flags; "Todos" mantém a união (mesmo
-    # critério de entrada na base, em _montar_base).
+    # Um produto pode ter as duas flags, nenhuma, ou não ter classificação
+    # ainda; "Todos" mostra todo produto ativo com consumo registrado,
+    # classificado ou não (a base em _montar_base não filtra por flag).
     class_sel = st.selectbox(
         "Classificação do insumo",
         ["Todos", "Somente insumos estratégicos", "Somente reposição contínua"],
