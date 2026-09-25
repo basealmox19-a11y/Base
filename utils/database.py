@@ -500,9 +500,14 @@ def historico_consumo_mensal(meses: int = 24) -> list:
         return []
 
 def historico_saidas_previsao(dias: int = 120) -> list:
-    """Retorna saídas concluídas dos últimos N dias, com produto e setor,
-    para alimentar o módulo de previsão de demanda (pages/previsao.py).
-    Exclui ajustes manuais (tipo_saida é None nesses casos — ver estoque.py)."""
+    """Retorna TODAS as saídas concluídas dos últimos N dias, com produto e
+    setor, para alimentar o módulo de previsão de demanda (pages/previsao.py).
+    Inclui também as saídas de Ajuste Manual (tipo_saida None — baixa física
+    registrada em estoque.py/_ajuste) como consumo: para a previsão, toda
+    baixa de estoque é demanda real, registrada ou não via solicitação
+    formal. Antes essas baixas ficavam de fora (tipo_saida precisava ser
+    não-nulo), o que fazia a previsão ignorar todo o consumo de produtos
+    cuja saída é lançada só por ajuste manual no dia a dia."""
     try:
         from datetime import datetime, timedelta
         lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
@@ -512,7 +517,6 @@ def historico_saidas_previsao(dias: int = 120) -> list:
                         "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,ativo,valor_unitario,"
                         "categorias(nome))")
                 .eq("tipo","saida").eq("status","concluido")
-                .not_.is_("tipo_saida","null")
                 .gte("criado_em", lim)
                 .order("criado_em", desc=False)
                 .execute().data or [])
@@ -521,17 +525,20 @@ def historico_saidas_previsao(dias: int = 120) -> list:
         return []
 
 def historico_entradas_previsao(dias: int = 120) -> list:
-    """Retorna entradas concluídas dos últimos N dias (id do produto, data,
-    quantidade), pra alimentar a reconstrução de nível de serviço em
-    pages/previsao.py. Exclui ajustes manuais (tipo_entrada='Ajuste Manual' —
-    ver estoque.py), mesmo critério usado em historico_saidas_previsao."""
+    """Retorna TODAS as entradas concluídas dos últimos N dias (id do
+    produto, data, quantidade), pra alimentar a reconstrução de CMP e o
+    nível de serviço em pages/previsao.py. Inclui também as entradas de
+    Ajuste Manual (reposição de saldo lançada por correção de inventário,
+    sem nota fiscal) — mesmo critério de "toda movimentação conta" usado em
+    historico_saidas_previsao. Entrada de ajuste normalmente não traz
+    valor_unitario, então só soma quantidade ao saldo sem alterar o CMP
+    reconstruído (ver _reconstruir_valor_saidas)."""
     try:
         from datetime import datetime, timedelta
         lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
         return (get_sb().table("movimentacoes")
                 .select("criado_em,produto_id,quantidade_convertida,valor_unitario")
                 .eq("tipo","entrada").eq("status","concluido")
-                .or_("tipo_entrada.is.null,tipo_entrada.neq.Ajuste Manual")
                 .gte("criado_em", lim)
                 .order("criado_em", desc=False)
                 .execute().data or [])
