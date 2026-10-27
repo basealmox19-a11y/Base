@@ -291,7 +291,8 @@ def _reabastecimento():
         """, unsafe_allow_html=True)
         if st.button("♻️ Novo Reabastecimento", type="primary", key="btn_novo_reab"):
             del st.session_state["reab_ok"]
-            st.session_state.pop("reab_prod_sel", None)
+            for k in [k for k in st.session_state if str(k).startswith("reab_")]:
+                st.session_state.pop(k, None)
             st.rerun()
         return
 
@@ -323,99 +324,98 @@ def _reabastecimento():
     # Tipo fora do form para condicionar obrigatoriedade NF
     te = st.selectbox("Tipo de entrada *", TIPOS, key="te_reab")
 
-    with st.form("freab"):
-        c1, c2 = st.columns(2)
-        with c1:
-            qtd = st.number_input("Quantidade (Informe o volume que você está recebendo, ex.: Caixa, Pacote...)", min_value=0.001, value=1.0, step=1.0)
-            ui  = _u("Unidade informada", val=up, key="ui_reab")
-            vu  = st.number_input("Valor Unitário (R$) — opcional", min_value=0.0,
-                                   value=float(prod.get("valor_unitario") or 0.0), step=0.01, format="%.2f",
-                                   help="Valor pago por unidade informada nesta compra. Deixe 0 se não quiser informar.",
-                                   key="vu_reab")
-        with c2:
-            nfn  = st.text_input("Número NF" + (" *" if te=="Nota Fiscal" else " (opcional)"),
-                                  placeholder="Ex: 001234")
-            cnr  = st.text_input("Número CNR / Pedido" + (" *" if te=="Nota Fiscal" else " (opcional)"),
-                                  placeholder="Ex: CNR-2025-001")
-            forn = st.text_input("Fornecedor" + (" *" if te=="Nota Fiscal" else " (opcional)"),
-                                  placeholder="Ex: Distribuidora ABC Ltda")
-            obs  = st.text_area("Observação", height=50)
+    # Só duas unidades são aceitas: a primária e a secundária do produto selecionado
+    pid = prod["id"]
+    mesmas = (up == us)
+    if mesmas:
+        opcoes_un = {up_lbl: up}
+    else:
+        opcoes_un = {f"{up_lbl} (primária)": up, f"{us_lbl} (secundária)": us}
 
-        qc     = qtd * fat
-        ui_lbl = sigla_para_opcao(ui)
+    # Campos sem st.form: a prévia de conversão atualiza em tempo real.
+    # Chaves com o id do produto para resetar ao trocar de produto.
+    c1, c2 = st.columns(2)
+    with c1:
+        qtd = st.number_input("Quantidade (Informe o volume que você está recebendo, ex.: Caixa, Pacote...)",
+                               min_value=0.001, value=1.0, step=1.0, key=f"reab_qtd_{pid}")
+        escolha = st.selectbox("Unidade informada", list(opcoes_un.keys()), key=f"reab_ui_{pid}")
+        vu  = st.number_input("Valor Unitário (R$) — opcional", min_value=0.0,
+                               value=float(prod.get("valor_unitario") or 0.0), step=0.01, format="%.2f",
+                               help="Valor pago por unidade informada nesta compra. Deixe 0 se não quiser informar.",
+                               key=f"reab_vu_{pid}")
+    with c2:
+        nfn  = st.text_input("Número NF" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                              placeholder="Ex: 001234", key=f"reab_nf_{pid}")
+        cnr  = st.text_input("Número CNR / Pedido" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                              placeholder="Ex: CNR-2025-001", key=f"reab_cnr_{pid}")
+        forn = st.text_input("Fornecedor" + (" *" if te=="Nota Fiscal" else " (opcional)"),
+                              placeholder="Ex: Distribuidora ABC Ltda", key=f"reab_forn_{pid}")
+        obs  = st.text_area("Observação", height=50, key=f"reab_obs_{pid}")
 
-        aviso_unidade = ""
-        if ui != up:
-            aviso_unidade = f"""
-            <div style="background:var(--warn-bg);border:1px solid rgba(217,119,6,.3);
-                        border-radius:7px;padding:.55rem .9rem;margin:.4rem 0;font-size:.78rem;
-                        color:var(--warn);">
-                ⚠️ Unidade informada (<strong>{ui_lbl}</strong>) é diferente da cadastrada
-                (<strong>{up_lbl}</strong>). Ao confirmar, o cadastro do produto será
-                atualizado para <strong>{ui_lbl}</strong>.
-            </div>
-            """
+    ui = opcoes_un[escolha]
+    usa_secundaria = (not mesmas) and ui == us
 
-        st.markdown(f"""
-        <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
-                    padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">
-            ➕ <strong>{qtd_br(qtd)} {ui_lbl}</strong>
-            <span style="color:var(--t3);"> = +</span>
-            <strong style="color:var(--ok);">{qtd_br(qc)} {us_lbl}</strong>
-            &nbsp;→&nbsp; Novo saldo:
-            <strong style="color:var(--red);">{qtd_br(est+qc)} {us_lbl}</strong>
-            {f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; total estimado: <strong>{_moeda(qtd*vu)}</strong></span>' if vu>0 else ''}
-        </div>
-        {aviso_unidade}
-        """, unsafe_allow_html=True)
+    # Secundária: grava exatamente o que foi digitado (sem conversão).
+    # Primária: converte pelo fator de conversão do cadastro.
+    qc     = qtd if usa_secundaria else qtd * fat
+    ui_lbl = us_lbl if usa_secundaria else up_lbl
 
-        # PDF upload removido
+    st.markdown(f"""
+    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
+                padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">
+        ➕ <strong>{qtd_br(qtd)} {ui_lbl}</strong>
+        <span style="color:var(--t3);"> = +</span>
+        <strong style="color:var(--ok);">{qtd_br(qc)} {us_lbl}</strong>
+        {'<span style="color:var(--t3);font-size:.74rem;"> (sem conversão)</span>' if usa_secundaria else ''}
+        &nbsp;→&nbsp; Novo saldo:
+        <strong style="color:var(--red);">{qtd_br(est+qc)} {us_lbl}</strong>
+        {f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; total estimado: <strong>{_moeda(qtd*vu)}</strong></span>' if vu>0 else ''}
+    </div>
+    """, unsafe_allow_html=True)
 
-        if st.form_submit_button("✅ Confirmar Reabastecimento", type="primary", use_container_width=True):
-            erros = []
-            if te == "Nota Fiscal":
-                if not nfn.strip():  erros.append("Número da NF obrigatório.")
-                if not forn.strip(): erros.append("Fornecedor obrigatório.")
-                if not cnr.strip():  erros.append("Número do Pedido/CNR obrigatório.")
-            if erros:
-                for e in erros: st.error(e)
-            else:
-                obs_final = obs.strip()
-                if cnr.strip():
-                    obs_final = f"CNR: {cnr.strip()}" + (f" | {obs_final}" if obs_final else "")
+    if st.button("✅ Confirmar Reabastecimento", type="primary", use_container_width=True, key="reab_confirmar"):
+        erros = []
+        if te == "Nota Fiscal":
+            if not nfn.strip():  erros.append("Número da NF obrigatório.")
+            if not forn.strip(): erros.append("Fornecedor obrigatório.")
+            if not cnr.strip():  erros.append("Número do Pedido/CNR obrigatório.")
+        if erros:
+            for e in erros: st.error(e)
+        else:
+            obs_final = obs.strip()
+            if cnr.strip():
+                obs_final = f"CNR: {cnr.strip()}" + (f" | {obs_final}" if obs_final else "")
 
-                from utils.fmt import agora_brt
-                agora = agora_brt()
+            from utils.fmt import agora_brt
+            agora = agora_brt()
 
-                registrar_entrada_com_valor({
-                    "produto_id":            prod["id"],
-                    "tipo":                  "entrada",
-                    "tipo_entrada":          te,
-                    "status":                "concluido",
-                    "quantidade_informada":  qtd,
-                    "unidade_informada":     ui,
-                    "quantidade_convertida": qc,
-                    "envio_financeiro":      True,
-                    "fornecedor":            forn.strip() or None,
-                    "numero_nf":             nfn.strip() or None,
-                    "observacao":            obs_final or None,
-                    "usuario_executor":      u["id"],
-                    "data_movimentacao":     agora.isoformat(),
-                    "valor_unitario":        vu if vu > 0 else None,
-                })
+            registrar_entrada_com_valor({
+                "produto_id":            prod["id"],
+                "tipo":                  "entrada",
+                "tipo_entrada":          te,
+                "status":                "concluido",
+                "quantidade_informada":  qtd,
+                "unidade_informada":     ui,
+                "quantidade_convertida": qc,
+                "envio_financeiro":      True,
+                "fornecedor":            forn.strip() or None,
+                "numero_nf":             nfn.strip() or None,
+                "observacao":            obs_final or None,
+                "usuario_executor":      u["id"],
+                "data_movimentacao":     agora.isoformat(),
+                "valor_unitario":        vu if vu > 0 else None,
+            })
 
-                # Atualiza a unidade primária cadastrada caso tenha sido alterada
-                if ui != up:
-                    atualizar_produto(prod["id"], {"unidade_primaria": ui})
+            # O cadastro do produto NÃO é mais alterado aqui.
 
-                st.session_state["reab_ok"] = {
-                    "nome":   prod["nome"],
-                    "qc":     qc,
-                    "us_lbl": us_lbl,
-                    "nick":   u.get("nick",""),
-                    "data":   agora.strftime("%d/%m/%Y %H:%M"),
-                }
-                st.rerun()
+            st.session_state["reab_ok"] = {
+                "nome":   prod["nome"],
+                "qc":     qc,
+                "us_lbl": us_lbl,
+                "nick":   u.get("nick",""),
+                "data":   agora.strftime("%d/%m/%Y %H:%M"),
+            }
+            st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
