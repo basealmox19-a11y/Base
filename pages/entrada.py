@@ -359,18 +359,22 @@ def _reabastecimento():
     qc     = qtd if usa_secundaria else qtd * fat
     ui_lbl = us_lbl if usa_secundaria else up_lbl
 
-    st.markdown(f"""
-    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;
-                padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">
-        ➕ <strong>{qtd_br(qtd)} {ui_lbl}</strong>
-        <span style="color:var(--t3);"> = +</span>
-        <strong style="color:var(--ok);">{qtd_br(qc)} {us_lbl}</strong>
-        {'<span style="color:var(--t3);font-size:.74rem;"> (sem conversão)</span>' if usa_secundaria else ''}
-        &nbsp;→&nbsp; Novo saldo:
-        <strong style="color:var(--red);">{qtd_br(est+qc)} {us_lbl}</strong>
-        {f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; total estimado: <strong>{_moeda(qtd*vu)}</strong></span>' if vu>0 else ''}
-    </div>
-    """, unsafe_allow_html=True)
+    # HTML em uma única linha (sem linhas em branco/indentação), senão o markdown
+    # interpreta o restante como bloco de código.
+    sem_conv = '<span style="color:var(--t3);font-size:.74rem;"> (sem conversão)</span>' if usa_secundaria else ''
+    linha_valor = (f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; '
+                   f'total estimado: <strong>{_moeda(qtd*vu)}</strong></span>') if vu > 0 else ''
+    html_prev = (
+        '<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;'
+        'padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">'
+        f'➕ <strong>{qtd_br(qtd)} {ui_lbl}</strong>'
+        '<span style="color:var(--t3);"> = +</span>'
+        f'<strong style="color:var(--ok);">{qtd_br(qc)} {us_lbl}</strong>{sem_conv}'
+        '&nbsp;→&nbsp; Novo saldo: '
+        f'<strong style="color:var(--red);">{qtd_br(est+qc)} {us_lbl}</strong>'
+        f'{linha_valor}</div>'
+    )
+    st.markdown(html_prev, unsafe_allow_html=True)
 
     if st.button("✅ Confirmar Reabastecimento", type="primary", use_container_width=True, key="reab_confirmar"):
         erros = []
