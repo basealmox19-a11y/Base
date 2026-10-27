@@ -326,11 +326,10 @@ def _reabastecimento():
 
     # Só duas unidades são aceitas: a primária e a secundária do produto selecionado
     pid = prod["id"]
-    mesmas = (up == us)
-    if mesmas:
-        opcoes_un = {up_lbl: up}
-    else:
-        opcoes_un = {f"{up_lbl} (primária)": up, f"{us_lbl} (secundária)": us}
+    # Sempre as duas opções, mesmo que as siglas sejam iguais no cadastro
+    LBL_P = f"{up_lbl} (primária)"
+    LBL_S = f"{us_lbl} (secundária)"
+    opcoes_un = {LBL_P: up, LBL_S: us}
 
     # Campos sem st.form: a prévia de conversão atualiza em tempo real.
     # Chaves com o id do produto para resetar ao trocar de produto.
@@ -353,7 +352,7 @@ def _reabastecimento():
         obs  = st.text_area("Observação", height=50, key=f"reab_obs_{pid}")
 
     ui = opcoes_un[escolha]
-    usa_secundaria = (not mesmas) and ui == us
+    usa_secundaria = (escolha == LBL_S)
 
     # Secundária: grava exatamente o que foi digitado (sem conversão).
     # Primária: converte pelo fator de conversão do cadastro.
