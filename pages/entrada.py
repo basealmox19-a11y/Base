@@ -338,9 +338,9 @@ def _reabastecimento():
         qtd = st.number_input("Quantidade (Informe o volume que você está recebendo, ex.: Caixa, Pacote...)",
                                min_value=0.001, value=1.0, step=1.0, key=f"reab_qtd_{pid}")
         escolha = st.selectbox("Unidade informada", list(opcoes_un.keys()), key=f"reab_ui_{pid}")
-        vu  = st.number_input("Valor Unitário (R$) — opcional", min_value=0.0,
+        vu  = st.number_input(f"Valor Unitário (R$ por {us_lbl}) — opcional", min_value=0.0,
                                value=float(prod.get("valor_unitario") or 0.0), step=0.01, format="%.2f",
-                               help="Valor pago por unidade informada nesta compra. Deixe 0 se não quiser informar.",
+                               help="Valor de cada unidade SECUNDÁRIA do produto, independente da unidade informada. Deixe 0 se não quiser informar.",
                                key=f"reab_vu_{pid}")
     with c2:
         nfn  = st.text_input("Número NF" + (" *" if te=="Nota Fiscal" else " (opcional)"),
@@ -362,8 +362,8 @@ def _reabastecimento():
     # HTML em uma única linha (sem linhas em branco/indentação), senão o markdown
     # interpreta o restante como bloco de código.
     sem_conv = '<span style="color:var(--t3);font-size:.74rem;"> (sem conversão)</span>' if usa_secundaria else ''
-    linha_valor = (f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{ui_lbl} &nbsp;·&nbsp; '
-                   f'total estimado: <strong>{_moeda(qtd*vu)}</strong></span>') if vu > 0 else ''
+    linha_valor = (f'<br><span style="color:var(--t3);font-size:.76rem;">💰 {_moeda(vu)}/{us_lbl} &nbsp;·&nbsp; '
+                   f'total estimado: <strong>{_moeda(qc*vu)}</strong></span>') if vu > 0 else ''
     html_prev = (
         '<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:7px;'
         'padding:.65rem .9rem;margin:.4rem 0;font-size:.8rem;">'
