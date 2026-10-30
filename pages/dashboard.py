@@ -392,7 +392,7 @@ def _atencao(produtos):
             un   = p.get("unidade_secundaria","")
             rows += (
                 f'<tr>'
-                f'<td>{nome[:28]}{"…" if len(nome)>28 else ""}</td>'
+                f'<td style="white-space:normal;word-break:break-word;">{nome}</td>'
                 f'<td class="mono">{qtd_br(est)} {un}</td>'
                 f'<td>{badge(_rotulo_status(txt),cls)}</td>'
                 f'</tr>'
