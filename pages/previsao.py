@@ -45,7 +45,7 @@ Modelo (documentado aqui de propósito — é a peça mais sensível do módulo)
     o ponto de pedido de hoje também valia no passado, na ausência de um
     histórico de saldo diário armazenado.
 """
-import streamlit as st, datetime, io, calendar, statistics, math
+import streamlit as st, datetime, io, calendar, statistics, math, re
 from collections import defaultdict
 import pandas as pd
 import plotly.graph_objects as go
@@ -149,6 +149,28 @@ def _reconstruir_valor_saidas(movs_saida, entradas_prod, valor_unitario_fallback
         s["custo_unit"] = round(cmp, 4)
         saldo = max(saldo - s["qtd"], 0.0)
 
+# Brasil sem horário de verão desde 2019: UTC-3 fixo (não depende de tzdata).
+_FUSO_LOCAL = datetime.timezone(datetime.timedelta(hours=-3))
+
+def _data_local(criado_em):
+    """Data (aaaa-mm-dd) da movimentação no horário de Brasília. O Supabase
+    devolve timestamptz em UTC; cortar a string em [:10] jogava saídas feitas
+    depois das 21h no dia seguinte, e no último dia do mês, no MÊS seguinte,
+    distorcendo os totais mensais usados na tendência. Sem fuso na string
+    (coluna sem timezone), mantém a data como está."""
+    if not criado_em:
+        return ""
+    try:
+        txt = str(criado_em).replace("Z", "+00:00")
+        # Python < 3.11 só aceita 3 ou 6 dígitos de fração de segundo
+        txt = re.sub(r"\.(\d+)", lambda g: "." + (g.group(1) + "000000")[:6], txt, count=1)
+        dt = datetime.datetime.fromisoformat(txt)
+    except ValueError:
+        return str(criado_em)[:10]
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_FUSO_LOCAL)
+    return dt.date().isoformat()
+
 def _montar_base():
     hist = historico_saidas_previsao(DIAS_HISTORICO)
     entradas = historico_entradas_previsao(DIAS_HISTORICO)
@@ -157,7 +179,7 @@ def _montar_base():
     entradas_map = defaultdict(list)
     for e in entradas:
         pid = e.get("produto_id")
-        data = (e.get("criado_em") or "")[:10]
+        data = _data_local(e.get("criado_em"))
         if not pid or not data:
             continue
         entradas_map[pid].append({"data": data, "qtd": float(e.get("quantidade_convertida") or 0),
@@ -169,7 +191,7 @@ def _montar_base():
     for m in hist:
         prod = m.get("produto") or {}
         pid = prod.get("id") or m.get("produto_id")
-        data = (m.get("criado_em") or "")[:10]
+        data = _data_local(m.get("criado_em"))
         if not pid or not data:
             continue
         if prod.get("ativo") is False:
