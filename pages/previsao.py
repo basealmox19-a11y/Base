@@ -88,6 +88,8 @@ def tela_previsao_demanda():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
+    _aviso_atualizacao_base(base)
+
     c1, c2 = st.columns(2)
     with c1:
         lead_time = st.number_input("Lead time de reposição (dias)", min_value=1,
@@ -192,6 +194,25 @@ def _montar_base():
 
     return {"produtos": produtos_map, "setores": dict(setor_movs),
             "setor_produto": dict(setor_produto_map), "entradas": dict(entradas_map)}
+
+DIAS_ALERTA_BASE_DEFASADA = 10
+
+def _aviso_atualizacao_base(base):
+    """Mostra até que data o histórico carregado vai. Se a última saída for muito
+    antiga, avisa: pode ser só ausência de movimentação, mas também pode ser a
+    consulta ao banco devolvendo um número limitado de linhas (ex.: 1000), o que
+    corta o histórico mais recente e "congela" a previsão numa data passada."""
+    datas = [m["data"] for p in base["produtos"].values() for m in p["movs"]]
+    if not datas:
+        return
+    ultima = datetime.date.fromisoformat(max(datas))
+    defasagem = (datetime.date.today() - ultima).days
+    if defasagem > DIAS_ALERTA_BASE_DEFASADA:
+        st.warning(f"⚠️ A última saída carregada é de {_fmt_data(ultima)} ({defasagem} dias atrás). "
+                   f"Se houve saídas depois dessa data, o histórico está sendo cortado na consulta "
+                   f"ao banco e a previsão está desatualizada.")
+    else:
+        st.caption(f"Histórico carregado até {_fmt_data(ultima)}.")
 
 def _extrair_categoria(info):
     c = info.get("categorias")
@@ -420,6 +441,34 @@ def _forecast_mensal(taxa_dia_util_pleno):
         resultado.append({"ano": ano, "mes": mes, "valor": total})
         ano, mes = _add_meses(ano, mes, 1)
     return resultado
+
+def _fim_horizonte_projecao():
+    """Último dia que a previsão alcança: fim do 12º mês após o mês em vigor
+    (mesmo horizonte de _forecast_mensal)."""
+    hoje = datetime.date.today()
+    return _fim_do_mes(*_add_meses(hoje.year, hoje.month, MESES_PROJECAO_FUTUROS))
+
+def _forecast_mensal_intervalo(taxa_dia_util_pleno, d_ini, d_fim):
+    """Consumo projetado mês a mês SÓ dentro do período [d_ini, d_fim] escolhido
+    pelo usuário. A parte do período que já passou é histórico real (não é
+    projetada); a projeção começa amanhã. Mesma taxa/sazonalidade/peso do dia
+    da semana da previsão geral."""
+    if taxa_dia_util_pleno <= 0:
+        return []
+    amanha = datetime.date.today() + datetime.timedelta(days=1)
+    cursor = max(d_ini, amanha)
+    por_mes = {}
+    while cursor <= d_fim:
+        chave = (cursor.year, cursor.month)
+        por_mes[chave] = por_mes.get(chave, 0.0) + _consumo_dia(taxa_dia_util_pleno, cursor)
+        cursor += datetime.timedelta(days=1)
+    return [{"ano": a, "mes": m, "valor": v} for (a, m), v in por_mes.items()]
+
+def _dias_futuros_no_periodo(d_ini, d_fim):
+    """Dias corridos do período que ainda estão no futuro (de amanhã até d_fim)."""
+    amanha = datetime.date.today() + datetime.timedelta(days=1)
+    inicio = max(d_ini, amanha)
+    return max((d_fim - inicio).days + 1, 0)
 
 
 # ── Cálculo por produto ──────────────────────────────────────────
@@ -805,14 +854,33 @@ def _tab_setor(base, produtos, lead_time):
                "das entradas) — evita somar litro com unidade com rolo como se fossem a mesma coisa. "
                "Escolhendo um produto específico, o gráfico volta pra unidade física dele.")
 
+    # O período precisa ir ALÉM da última saída registrada: antes o limite era
+    # max_value=datas[-1] (data da última saída), o que travava o seletor no
+    # passado e impedia ver qualquer projeção. Agora vai do início do histórico
+    # até o fim do horizonte de previsão (mês em vigor + 12 meses).
+    hoje = datetime.date.today()
     datas = sorted(datetime.date.fromisoformat(m["data"]) for m in movs_setor)
+    data_min = min(datas[0], hoje)
+    data_max = _fim_horizonte_projecao()
+    # Chave por setor: cada setor tem seu próprio início de histórico; com uma
+    # chave única, o período salvo de um setor podia ficar fora dos limites do
+    # outro e o Streamlit rejeitava o valor.
+    chave_periodo = f"prev_setor_periodo::{setor_sel}"
+    salvo = st.session_state.get(chave_periodo)
+    if isinstance(salvo, (tuple, list)) and any(not (data_min <= d <= data_max) for d in salvo):
+        del st.session_state[chave_periodo]
     with c2:
-        intervalo = st.date_input("Período", value=(datas[0], datas[-1]),
-                                   min_value=datas[0], max_value=datas[-1], key="prev_setor_periodo")
-    if isinstance(intervalo, tuple) and len(intervalo) == 2:
+        intervalo = st.date_input("Período", value=(datas[0], data_max),
+                                   min_value=data_min, max_value=data_max, key=chave_periodo,
+                                   format="DD/MM/YYYY",
+                                   help="Datas passadas mostram o consumo realizado; datas futuras "
+                                        "mostram o consumo projetado (tendência + sazonalidade).")
+    if isinstance(intervalo, (tuple, list)) and len(intervalo) == 2:
         d_ini, d_fim = intervalo
     else:
-        d_ini, d_fim = datas[0], datas[-1]
+        d_ini, d_fim = datas[0], data_max
+    st.caption(f"Última saída registrada neste setor: {_fmt_data(datas[-1])} · "
+               f"projeção disponível até {_fmt_data(data_max)}.")
 
     if prod_filtro == TODOS:
         movs_calc = [{"data": m["data"], "qtd": m.get("valor", 0.0)} for m in movs_setor]
@@ -823,7 +891,7 @@ def _tab_setor(base, produtos, lead_time):
 
     movs_calc_filtrados = [m for m in movs_calc if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
     taxa_setor, _expurgo_setor = _taxa_mensal_tendencia(movs_calc)
-    _grafico_setor(movs_calc_filtrados, taxa_setor, modo_valor, unidade_grafico)
+    _grafico_setor(movs_calc_filtrados, taxa_setor, modo_valor, unidade_grafico, d_ini, d_fim)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="card" style="margin-top:1rem;">'
@@ -832,8 +900,11 @@ def _tab_setor(base, produtos, lead_time):
                "DESTE setor pra cada item — solicitação formal ou saída manual, qualquer "
                "saída conta como reposição (não usam a tendência mensal do restante da "
                "previsão). Com só 1 saída registrada, a estimativa usa o lead time como "
-               "calibração inicial e se ajusta sozinha a partir da 2ª saída.")
-    hoje = datetime.date.today()
+               "calibração inicial e se ajusta sozinha a partir da 2ª saída. "
+               "Quando o período avança sobre datas futuras, a coluna \"Previsto\" projeta o "
+               "consumo do item neste setor (tendência mensal; itens marcados com * ainda não "
+               "têm mês fechado e usam o giro do setor).")
+    dias_futuros = _dias_futuros_no_periodo(d_ini, d_fim)
     linhas = ""
     for pid, sp in itens_setor.items():
         prod_geral = produtos_by_id.get(pid)
@@ -842,12 +913,26 @@ def _tab_setor(base, produtos, lead_time):
         movs_periodo = [m for m in sp["movs"] if d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim]
         qtd_periodo = sum(m["qtd"] for m in movs_periodo)
         valor_periodo = sum(m.get("valor", 0.0) for m in movs_periodo)
-        if qtd_periodo <= 0:
-            continue
         # giro/média de reposição usam TODO o histórico do item nesse setor (não só o
         # período filtrado no gráfico acima) — precisam da série completa de solicitações
         # pra medir o intervalo real entre pedidos.
         giro = _giro_estoque_item_setor(sp["movs"], lead_time_fallback=lead_time)
+
+        # Projeção da parte futura do período (de amanhã até d_fim).
+        qtd_prevista, marca_prev = 0.0, ""
+        if dias_futuros > 0:
+            taxa_item, _exp_item = _taxa_mensal_tendencia(sp["movs"])
+            if taxa_item > 0:
+                qtd_prevista = sum(f["valor"] for f in _forecast_mensal_intervalo(taxa_item, d_ini, d_fim))
+            elif giro and giro["giro_diario"]:
+                qtd_prevista = giro["giro_diario"] * dias_futuros
+                marca_prev = "*"
+        ultimo_mov = max(sp["movs"], key=lambda m: m["data"]) if sp["movs"] else {}
+        custo_atual = float(ultimo_mov.get("custo_unit") or 0)
+        valor_previsto = qtd_prevista * custo_atual
+
+        if qtd_periodo <= 0 and qtd_prevista <= 0:
+            continue
         status, cor = _status_reposicao_setor(giro, hoje)
         ultima_data_fmt = _fmt_data(datetime.date.fromisoformat(giro["ultima_data"])) if giro else "—"
         ultima_qtd_fmt = f'{qtd_br(round(giro["ultima_qtd"]))} {esc(prod_geral["unidade"])}' if giro else "—"
@@ -856,12 +941,19 @@ def _tab_setor(base, produtos, lead_time):
                                 if giro else "—")
         proxima_fmt = (_fmt_data(giro["proxima_data_estimada"])
                         if giro and giro["proxima_data_estimada"] else "—")
+        realizado_fmt = f'{qtd_br(round(qtd_periodo))} {esc(prod_geral["unidade"])}' if qtd_periodo > 0 else "—"
+        valor_realizado_fmt = _fmt_reais(valor_periodo) if qtd_periodo > 0 else "—"
+        previsto_fmt = (f'{qtd_br(math.ceil(qtd_prevista - 1e-9))} {esc(prod_geral["unidade"])}{marca_prev}'
+                        if qtd_prevista > 0 else "—")
+        valor_previsto_fmt = _fmt_reais(valor_previsto) if qtd_prevista > 0 and custo_atual > 0 else "—"
         linhas += (
             f'<tr><td><strong>{esc(prod_geral["nome"])}</strong></td>'
             f'<td>{ultima_data_fmt}</td>'
             f'<td>{ultima_qtd_fmt}</td>'
-            f'<td>{qtd_br(round(qtd_periodo))} {esc(prod_geral["unidade"])}</td>'
-            f'<td>{_fmt_reais(valor_periodo)}</td>'
+            f'<td>{realizado_fmt}</td>'
+            f'<td>{valor_realizado_fmt}</td>'
+            f'<td style="color:var(--warn);font-weight:600;">{previsto_fmt}</td>'
+            f'<td style="color:var(--warn);">{valor_previsto_fmt}</td>'
             f'<td>{giro_fmt}</td>'
             f'<td>{media_reposicao_fmt}</td>'
             f'<td>{proxima_fmt}</td>'
@@ -870,8 +962,10 @@ def _tab_setor(base, produtos, lead_time):
     if linhas:
         st.markdown(
             f'<table class="tbl"><thead><tr><th>Item</th><th>Última solicitação</th>'
-            f'<th>Última qtd abastecida</th><th>Consumido no período</th>'
-            f'<th>Valor gasto no período</th>'
+            f'<th>Última qtd abastecida</th><th>Consumido no período (realizado)</th>'
+            f'<th>Valor gasto no período (realizado)</th>'
+            f'<th>Previsto no período (projetado)</th>'
+            f'<th>Valor previsto (custo atual)</th>'
             f'<th>Giro (un/dia, setor)</th><th>Média de reposição (setor)</th>'
             f'<th>Próxima reposição estimada (setor)</th>'
             f'<th>Situação de ressuprimento (setor)</th></tr></thead>'
@@ -881,8 +975,9 @@ def _tab_setor(base, produtos, lead_time):
         st.info("Nenhum item com consumo no período selecionado.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    itens_com_dados = [pid for pid, sp in itens_setor.items() if pid in produtos_by_id
-                        and any(d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim for m in sp["movs"])]
+    itens_com_dados = [pid for pid, sp in itens_setor.items() if pid in produtos_by_id and sp["movs"]
+                        and (dias_futuros > 0
+                             or any(d_ini <= datetime.date.fromisoformat(m["data"]) <= d_fim for m in sp["movs"]))]
     if itens_com_dados:
         st.markdown('<div class="card" style="margin-top:1rem;">'
                      '<div class="card-h">Curva de consumo × valor gasto por item</div>', unsafe_allow_html=True)
@@ -895,7 +990,7 @@ def _tab_setor(base, produtos, lead_time):
         _grafico_item_setor(itens_setor[pid_curva]["movs"], produtos_by_id[pid_curva]["unidade"])
         st.markdown("</div>", unsafe_allow_html=True)
 
-def _grafico_setor(movs_filtrados, taxa_setor, modo_valor=False, unidade=""):
+def _grafico_setor(movs_filtrados, taxa_setor, modo_valor=False, unidade="", d_ini=None, d_fim=None):
     hist_por_mes = defaultdict(float)
     for m in movs_filtrados:
         d = datetime.date.fromisoformat(m["data"])
@@ -904,7 +999,12 @@ def _grafico_setor(movs_filtrados, taxa_setor, modo_valor=False, unidade=""):
     hist_x = [f'{_NOMES_MES[mes]}/{str(ano)[2:]}' for (ano, mes), _ in hist_items]
     hist_y = [v for _, v in hist_items]
 
-    forecast = _forecast_mensal(taxa_setor)
+    # Previsão limitada ao período escolhido (só a parte futura dele). Sem
+    # período informado, mantém o comportamento antigo (mês em vigor + 12).
+    if d_ini is not None and d_fim is not None:
+        forecast = _forecast_mensal_intervalo(taxa_setor, d_ini, d_fim)
+    else:
+        forecast = _forecast_mensal(taxa_setor)
     fc_x = [f'{_NOMES_MES[f["mes"]]}/{str(f["ano"])[2:]}' for f in forecast]
     fc_y = [f["valor"] for f in forecast]
 
