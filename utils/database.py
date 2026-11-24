@@ -483,18 +483,54 @@ def contar_solicitacoes_compra_pendentes() -> int:
         return 0
 
 # ── PREVISÃO DE DEMANDA (crowdsourcing histórico) ────────────────
+# O Supabase (PostgREST) devolve no máximo ~1000 linhas por requisição. As
+# consultas abaixo buscam anos de histórico em ordem crescente, então sem
+# paginação a previsão recebia só as 1000 movimentações MAIS ANTIGAS: os meses
+# seguintes vinham vazios ou incompletos e a previsão "parava" numa data
+# passada. _buscar_todas pagina até trazer tudo.
+_PAGINA_PREVISAO = 1000
+_MAX_PAGINAS_PREVISAO = 500   # trava de segurança (500 × 1000 = 500 mil linhas)
+
+def _buscar_todas(montar_query) -> list:
+    """Executa a consulta em páginas e devolve todas as linhas.
+
+    montar_query: função sem argumentos que devolve um query builder NOVO a
+    cada chamada (o builder do supabase-py é mutável; reaproveitar o mesmo
+    acumularia parâmetros de range). A consulta precisa ter ordenação total
+    (criado_em + id) pra nenhuma linha ser pulada ou repetida entre páginas
+    quando várias movimentações têm o mesmo horário.
+
+    O deslocamento avança pelo número de linhas REALMENTE recebidas e só para
+    quando uma página vem vazia — assim funciona mesmo se o servidor estiver
+    configurado com um limite menor que _PAGINA_PREVISAO."""
+    linhas, inicio = [], 0
+    for _ in range(_MAX_PAGINAS_PREVISAO):
+        pagina = (montar_query()
+                  .range(inicio, inicio + _PAGINA_PREVISAO - 1)
+                  .execute().data or [])
+        if not pagina:
+            break
+        linhas.extend(pagina)
+        inicio += len(pagina)
+    else:
+        _log.warning("_buscar_todas: limite de %s páginas atingido; histórico truncado",
+                     _MAX_PAGINAS_PREVISAO)
+    return linhas
+
+def _limite_data(dias: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(days=dias)).isoformat()
+
 def historico_consumo_mensal(meses: int = 24) -> list:
     """Retorna consumo mensal agrupado por produto dos últimos N meses."""
     try:
-        from datetime import datetime, timedelta
-        lim = (datetime.utcnow() - timedelta(days=meses*30)).isoformat()
-        dados = (get_sb().table("movimentacoes")
-                 .select("criado_em,produto_id,quantidade_convertida,produto:produtos(nome,unidade_secundaria)")
-                 .eq("tipo","saida").eq("status","concluido")
-                 .gte("criado_em", lim)
-                 .order("criado_em", desc=False)
-                 .execute().data or [])
-        return dados
+        lim = _limite_data(meses * 30)
+        return _buscar_todas(lambda: (
+            get_sb().table("movimentacoes")
+            .select("criado_em,produto_id,quantidade_convertida,produto:produtos(nome,unidade_secundaria)")
+            .eq("tipo","saida").eq("status","concluido")
+            .gte("criado_em", lim)
+            .order("criado_em", desc=False).order("id", desc=False)))
     except Exception as e:
         _log.error("historico_consumo_mensal: %s", e)
         return []
@@ -505,21 +541,19 @@ def historico_saidas_previsao(dias: int = 120) -> list:
     Inclui também as saídas de Ajuste Manual (tipo_saida None — baixa física
     registrada em estoque.py/_ajuste) como consumo: para a previsão, toda
     baixa de estoque é demanda real, registrada ou não via solicitação
-    formal. Antes essas baixas ficavam de fora (tipo_saida precisava ser
-    não-nulo), o que fazia a previsão ignorar todo o consumo de produtos
-    cuja saída é lançada só por ajuste manual no dia a dia."""
+    formal. Paginada (ver _buscar_todas) — antes só as 1000 primeiras linhas
+    chegavam à previsão."""
     try:
-        from datetime import datetime, timedelta
-        lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
-        return (get_sb().table("movimentacoes")
-                .select("criado_em,produto_id,quantidade_convertida,setor_solicitante,"
-                        "produto:produtos(id,nome,codigo_interno,unidade_primaria,unidade_secundaria,"
-                        "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,ativo,valor_unitario,"
-                        "categorias(nome))")
-                .eq("tipo","saida").eq("status","concluido")
-                .gte("criado_em", lim)
-                .order("criado_em", desc=False)
-                .execute().data or [])
+        lim = _limite_data(dias)
+        return _buscar_todas(lambda: (
+            get_sb().table("movimentacoes")
+            .select("id,criado_em,produto_id,quantidade_convertida,setor_solicitante,"
+                    "produto:produtos(id,nome,codigo_interno,unidade_primaria,unidade_secundaria,"
+                    "quantidade_total_secundaria,estoque_minimo_primario,fator_conversao,ativo,valor_unitario,"
+                    "categorias(nome))")
+            .eq("tipo","saida").eq("status","concluido")
+            .gte("criado_em", lim)
+            .order("criado_em", desc=False).order("id", desc=False)))
     except Exception as e:
         _log.error("historico_saidas_previsao: %s", e)
         return []
@@ -529,19 +563,17 @@ def historico_entradas_previsao(dias: int = 120) -> list:
     produto, data, quantidade), pra alimentar a reconstrução de CMP e o
     nível de serviço em pages/previsao.py. Inclui também as entradas de
     Ajuste Manual (reposição de saldo lançada por correção de inventário,
-    sem nota fiscal) — mesmo critério de "toda movimentação conta" usado em
-    historico_saidas_previsao. Entrada de ajuste normalmente não traz
-    valor_unitario, então só soma quantidade ao saldo sem alterar o CMP
-    reconstruído (ver _reconstruir_valor_saidas)."""
+    sem nota fiscal). Entrada de ajuste normalmente não traz valor_unitario,
+    então só soma quantidade ao saldo sem alterar o CMP reconstruído (ver
+    _reconstruir_valor_saidas). Paginada (ver _buscar_todas)."""
     try:
-        from datetime import datetime, timedelta
-        lim = (datetime.utcnow() - timedelta(days=dias)).isoformat()
-        return (get_sb().table("movimentacoes")
-                .select("criado_em,produto_id,quantidade_convertida,valor_unitario")
-                .eq("tipo","entrada").eq("status","concluido")
-                .gte("criado_em", lim)
-                .order("criado_em", desc=False)
-                .execute().data or [])
+        lim = _limite_data(dias)
+        return _buscar_todas(lambda: (
+            get_sb().table("movimentacoes")
+            .select("id,criado_em,produto_id,quantidade_convertida,valor_unitario")
+            .eq("tipo","entrada").eq("status","concluido")
+            .gte("criado_em", lim)
+            .order("criado_em", desc=False).order("id", desc=False)))
     except Exception as e:
         _log.error("historico_entradas_previsao: %s", e)
         return []
